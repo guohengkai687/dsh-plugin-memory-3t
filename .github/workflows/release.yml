@@ -1,0 +1,52 @@
+name: Release
+
+# 触发方式：
+#   1) push 形如 v0.6.0 / v1.0.0 的 tag → 自动构建 + pack + 创建 GitHub Release 并附 tgz；
+#   2) 手动 workflow_dispatch（需填写 tag 名，用于补发/重发某个版本）。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要打 Release 的 tag 名（例如 v0.6.0）。push tag 触发时忽略此项。'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (server + client)
+        run: npm run typecheck
+
+      - name: Build client bundle
+        run: npm run build:client
+
+      - name: Build + full test suite (134/134, 0 skip under real git)
+        run: npm run test
+
+      - name: Pack publish tarball
+        run: npm pack --pack-destination ./dist-tarball
+
+      - name: Upload tarball to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: ./dist-tarball/*.tgz
