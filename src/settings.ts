@@ -1,5 +1,5 @@
 /**
- * 设置页桥（v0.5 新增）：把 dsh-dev-memory-3t 的 WebUI 功能与可调参数接入
+ * 设置页桥（v0.5 新增）：把 dsh-plugin-memory-3t 的 WebUI 功能与可调参数接入
  * DSH 设置体系（settings namespace + 客户端「记忆管理」设置页/卡片）。
  *
  * 服务端职责（本文件，node 侧）：

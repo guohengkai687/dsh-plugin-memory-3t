@@ -1,8 +1,8 @@
-# dsh-dev-memory-3t · v0.1 MVP — 团队交接物总入口
+# dsh-plugin-memory-3t · v0.1 MVP — 团队交接物总入口
 
 ## 目标
 
-交付 DSH 记忆插件 `dsh-dev-memory-3t` v0.1 MVP：三层记忆（L1 会话流水 / L2 知识笔记 / L3 长期事实）+ 本地 BM25 检索 + 7 个 `devmemory_*` 工具 + 内嵌 skill `dev-memory` + 生命周期接入（注入/提醒/digest 沉淀），全程 fail-open。**不依赖任何外部服务**。
+交付 DSH 记忆插件 `dsh-plugin-memory-3t` v0.1 MVP：三层记忆（L1 会话流水 / L2 知识笔记 / L3 长期事实）+ 本地 BM25 检索 + 7 个 `devmemory_*` 工具 + 内嵌 skill `dev-memory` + 生命周期接入（注入/提醒/digest 沉淀），全程 fail-open。**不依赖任何外部服务**。
 
 ## 范围
 
@@ -13,10 +13,10 @@
 
 | 项 | 路径 |
 |---|---|
-| 设计文档（权威来源） | `D:\DeepSeek\Harness\dsh-dev-memory-3t\docs\design\DESIGN.md`（2026-08 从 `design/memory-3t/` 归纳迁入） |
-| 插件项目根 | `D:\DeepSeek\Harness\dsh-dev-memory-3t\` |
-| 团队交接物 | `D:\DeepSeek\Harness\dsh-dev-memory-3t\docs\team\`（本目录） |
-| skill 协议正文 | `D:\DeepSeek\Harness\dsh-dev-memory-3t\docs\design\skill.dev-memory.md`（设计草案；运行版在 `skills/dev-memory.md`） |
+| 设计文档（权威来源） | `D:\DeepSeek\Harness\dsh-plugin-memory-3t\docs\design\DESIGN.md`（2026-08 从 `design/memory-3t/` 归纳迁入） |
+| 插件项目根 | `D:\DeepSeek\Harness\dsh-plugin-memory-3t\` |
+| 团队交接物 | `D:\DeepSeek\Harness\dsh-plugin-memory-3t\docs\team\`（本目录） |
+| skill 协议正文 | `D:\DeepSeek\Harness\dsh-plugin-memory-3t\docs\design\skill.dev-memory.md`（设计草案；运行版在 `skills/dev-memory.md`） |
 | DSH 接口源码（签名查证） | `E:\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\{dsh-tools,dsh-skill,dsh-system-prompt,dsh-agent-loop}\lib\index.js` |
 
 ## 阶段与门禁

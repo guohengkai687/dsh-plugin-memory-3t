@@ -1,6 +1,6 @@
-# QA — dsh-dev-memory-3t v0.1 验收执行结果
+# QA — dsh-plugin-memory-3t v0.1 验收执行结果
 
-> 执行人：TL（串行 QA，因子代理环境限制降级）。执行命令均在 `D:\DeepSeek\Harness\dsh-dev-memory-3t` 实跑。
+> 执行人：TL（串行 QA，因子代理环境限制降级）。执行命令均在 `D:\DeepSeek\Harness\dsh-plugin-memory-3t` 实跑。
 
 ## 执行证据（2026-01-15）
 

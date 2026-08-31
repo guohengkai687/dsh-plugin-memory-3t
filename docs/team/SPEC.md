@@ -1,4 +1,4 @@
-# SPEC — dsh-dev-memory-3t v0.1 MVP
+# SPEC — dsh-plugin-memory-3t v0.1 MVP
 
 > 来源：`docs/design/DESIGN.md`（§1–§10，初版生成时位于 `design/memory-3t/`）。所有 AC 必须**可测**。
 
@@ -16,7 +16,7 @@ DSH 本地三层记忆插件：插件管机制（存储/注入/检索/安全）�
 
 ## 验收标准（AC）
 
-**AC1 包结构**：`package.json`（name `dsh-dev-memory-3t`、MIT、零 runtime deps、exports/type 正确）、`cordis.patch.yml`（bundle patch）、`tsconfig.json`、`src/`、`skills/dev-memory.md`、`test/`、`README.md`。
+**AC1 包结构**：`package.json`（name `dsh-plugin-memory-3t`、MIT、零 runtime deps、exports/type 正确）、`cordis.patch.yml`（bundle patch）、`tsconfig.json`、`src/`、`skills/dev-memory.md`、`test/`、`README.md`。
 - 证据：文件存在且内容完整；`tsc --noEmit` 通过。
 
 **AC2 三层存储**：默认库根 `<workspace>/.memory/`（config `storageDir` 可覆盖）；目录 `runtime/`（L1，`YYYY-MM-DD.md` 追加）、`docs/`（L2，支持子目录与 append）、`spaces/`（L3，frontmatter：id/kind/created/updated/salience/accesses/tags/links）；`meta.json`（schema version/开关/digest 状态）、`audit.jsonl`（forget 审计）。

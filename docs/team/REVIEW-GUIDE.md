@@ -6,7 +6,7 @@
 
 - **A1** TS strict：`tsc --noEmit` 零错误；无 `any` 滥用；类型自洽。
 - **A2** 零运行时依赖：package.json `dependencies` 为空；peerDependencies 仅声明必要项（若 DSH 约定要求）。
-- **A3** 命名一致性：工具 `devmemory_*` ×7、skill `dev-memory`、boot context `dev-memory-boot`、包名 `dsh-dev-memory-3t`——全文无残留 `memory3t`/`dsh-memory-3t` 旧名。
+- **A3** 命名一致性：工具 `devmemory_*` ×7、skill `dev-memory`、boot context `dev-memory-boot`、包名 `dsh-plugin-memory-3t`——全文无残留 `memory3t`/`dsh-memory-3t` 旧名。
 - **A4** 结构：无未完成 TODO 占位；注释解释"为什么"而非复述"做什么"；模块职责单一。
 - **A5** 错误处理：所有外部可触发路径 fail-open（记忆故障不得抛到会话）；digest 全流程 try/catch；索引损坏退化为扫描/报状态。
 - **A6** 安全：路径参数全部过 `safeJoin`（`..` 逃逸拒绝）；audit 日志存在；无密钥/敏感信息进 prompt 返回。
@@ -29,7 +29,7 @@
 ## C. 执行验证（审查者必须自己跑，不轻信报告）
 
 ```powershell
-cd D:\DeepSeek\Harness\dsh-dev-memory-3t
+cd D:\DeepSeek\Harness\dsh-plugin-memory-3t
 npm run typecheck          # 必须零错误
 npm test                   # 必须全绿；记录用例数与失败数
 ```

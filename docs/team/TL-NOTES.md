@@ -49,7 +49,7 @@ function createPluginMessage(text: string, form: 'recall'|'notice'|'instructions
 ```
 
 pre-step handler 修改决策（`lifecycle.ts` line ~328）：`return { kind: 'enter', messages: [...decision.messages, createPluginMessage(reminder, 'instructions', '…')] }`。
-→ 我们的插件将 `plugin: 'dsh-dev-memory-3t'`、`form: 'instructions'`。
+→ 我们的插件将 `plugin: 'dsh-plugin-memory-3t'`、`form: 'instructions'`。
 
 ## 3. 生命周期事件 payload（参考 mnemon contracts + agent-loop）
 
@@ -105,7 +105,7 @@ ctx.systemPrompt.context({
   纯文本任务不触发、工具调用后下一条 LLM 请求触发。——单元测试覆盖不到，属集成面。
 - `dsh plugin --profile <name> add <tarball>`：成功安装后自动把声明 `dsh.bundle.patch` 的包追加进
   `dsh.profile.bundles`（`dsh\lib\plugin-9h8shc4d.js` reconcile）；本地包需先 `npm pack`。
-- headless 冒烟：`--dump-config` 验证组合树含 `# == dsh-dev-memory-3t` 段；`--patch overlay.yml`
+- headless 冒烟：`--dump-config` 验证组合树含 `# == dsh-plugin-memory-3t` 段；`--patch overlay.yml`
   可临时 `- id: <name>, disabled: true` 做对照。
 
 ## 8. v0.2 git 回溯（设计核实 + 实测）

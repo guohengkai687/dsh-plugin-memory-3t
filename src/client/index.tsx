@@ -1,5 +1,5 @@
 /**
- * dsh-dev-memory-3t 客户端 bundle（v0.5 新增）。
+ * dsh-plugin-memory-3t 客户端 bundle（v0.5 新增）。
  *
  * 通过 package.json `dsh.client` 声明 + `exports["./client"]` 被 web shell 发现，
  * 加载为浏览器 cordis 客户端插件（built by tsdown，`window.__ModuleLoader__.load`
@@ -41,7 +41,7 @@ export interface BrowserPluginContext {
 }
 
 /** 本客户端插件的完整 id（与包名一致，用于 dsh.client 发现与 __ModuleLoader__ id）。 */
-const PLUGIN_ID = 'dsh-dev-memory-3t'
+const PLUGIN_ID = 'dsh-plugin-memory-3t'
 /** settings.section 导航顺序：默认 General/Models 之后、插件市场(40)之后。 */
 const SECTION_ORDER = 46
 

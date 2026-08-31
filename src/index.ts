@@ -1,5 +1,5 @@
 /**
- * dsh-dev-memory-3t 插件入口：机制层接线。
+ * dsh-plugin-memory-3t 插件入口：机制层接线。
  *
  * - 生命周期：session-start 装载视图 / pre-step 记录消息 + 引导提醒 /
  *   turn-stopping digest 沉淀 / created（subagent 继承，v0.1 简化为共享视图）
@@ -48,7 +48,7 @@ export interface PluginContext {
   systemPrompt: { context(entry: { name: string; order: number; text: (context?: unknown) => string }): unknown }
 }
 
-export const name = 'dsh-dev-memory-3t'
+export const name = 'dsh-plugin-memory-3t'
 export const inject = ['systemPrompt', 'skills', 'tools']
 
 interface AgentView {
@@ -76,7 +76,7 @@ function createPluginMessage(text: string, form: string, summary?: string): Reco
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'dsh-dev-memory-3t', form, ...(summary === undefined ? {} : { summary }) },
+    source: { kind: 'plugin', plugin: 'dsh-plugin-memory-3t', form, ...(summary === undefined ? {} : { summary }) },
   }
 }
 

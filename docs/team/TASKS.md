@@ -1,10 +1,10 @@
-# TASKS — dsh-dev-memory-3t v0.1 MVP 任务拆解
+# TASKS — dsh-plugin-memory-3t v0.1 MVP 任务拆解
 
 > 阻塞关系：T1（脚手架）→ T2–T8 可并行（模块独立）→ T9 依赖全部模块 → T10 依赖 T9 → T11 依赖全部。
 > 每任务完成标志必须可核验；对应 SPEC AC 已标注。测试文件一律 `.mjs`（node --test），测 **dist 产物**（ESM）。
 
 ## T1 脚手架（AC1）
-- 文件：`package.json`（name `dsh-dev-memory-3t`、version 0.1.0、type module、license MIT、**dependencies 为空**、devDependencies 仅 `typescript@^5`、scripts: `build`/`test`/`typecheck`、exports 指向 `dist/index.js`、main/types 指向 dist）、`tsconfig.json`（ESM, module NodeNext, outDir dist, strict）、`tsconfig.cjs.json`（若需 CJS；**裁定：v0.1 仅 ESM，若无 cordis 兼容疑虑不建 CJS**）、`cordis.patch.yml`（对照 `.tmp/plugin-eval/ltb-src/cordis.patch.yml` 与 mnemon 的格式：`- insert: { id: <插件>, name: dsh-dev-memory-3t, config: { …默认配置… } }`）、`.gitignore`（node_modules/ dist/；**不要忽略 .memory/ 本身**——那是插件库根，与仓库 .gitignore 互斥，由插件自维护）、`src/index.ts` 空壳、`skills/dev-memory.md`（从 `docs/design/skill.dev-memory.md` 原样复制）。
+- 文件：`package.json`（name `dsh-plugin-memory-3t`、version 0.1.0、type module、license MIT、**dependencies 为空**、devDependencies 仅 `typescript@^5`、scripts: `build`/`test`/`typecheck`、exports 指向 `dist/index.js`、main/types 指向 dist）、`tsconfig.json`（ESM, module NodeNext, outDir dist, strict）、`tsconfig.cjs.json`（若需 CJS；**裁定：v0.1 仅 ESM，若无 cordis 兼容疑虑不建 CJS**）、`cordis.patch.yml`（对照 `.tmp/plugin-eval/ltb-src/cordis.patch.yml` 与 mnemon 的格式：`- insert: { id: <插件>, name: dsh-plugin-memory-3t, config: { …默认配置… } }`）、`.gitignore`（node_modules/ dist/；**不要忽略 .memory/ 本身**——那是插件库根，与仓库 .gitignore 互斥，由插件自维护）、`src/index.ts` 空壳、`skills/dev-memory.md`（从 `docs/design/skill.dev-memory.md` 原样复制）。
 - 完成标志：`npm install`（--cache 本地）成功；`tsc --noEmit` 通过（空壳）。
 
 ## T2 config.ts（AC9）

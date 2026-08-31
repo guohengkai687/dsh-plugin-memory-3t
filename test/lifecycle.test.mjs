@@ -90,7 +90,7 @@ test('lifecycle: pre-step 记录消息并注入提醒（预算内）', async () 
     assert.ok(out1.messages.length > 1)
     const injected = out1.messages[out1.messages.length - 1]
     assert.equal(injected.source.kind, 'plugin')
-    assert.equal(injected.source.plugin, 'dsh-dev-memory-3t')
+    assert.equal(injected.source.plugin, 'dsh-plugin-memory-3t')
 
     // 第二次：无触发词 → 原样
     const out2 = await preStep(

@@ -136,7 +136,7 @@ export function renderIndexPage(): string {
 <body>
 <main>
   <h1>dev-memory 记忆面板 <span class="badge off">只读</span></h1>
-  <div class="sub">dsh-dev-memory-3t · 本地三层记忆 · 本页不提供任何写入操作</div>
+  <div class="sub">dsh-plugin-memory-3t · 本地三层记忆 · 本页不提供任何写入操作</div>
   <div class="card"><div class="grid" id="status"><div class="k">加载中…</div></div></div>
   <div class="card">
     <div class="row" style="justify-content:space-between">

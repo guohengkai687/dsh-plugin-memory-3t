@@ -9,7 +9,7 @@
  */
 import { defineConfig } from 'tsdown'
 
-const PLUGIN_ID = 'dsh-dev-memory-3t'
+const PLUGIN_ID = 'dsh-plugin-memory-3t'
 
 export default defineConfig({
   name: `${PLUGIN_ID}/client`,

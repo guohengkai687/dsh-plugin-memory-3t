@@ -1,6 +1,6 @@
-# dsh-dev-memory-3t — 本地三层记忆插件设计方案
+# dsh-plugin-memory-3t — 本地三层记忆插件设计方案
 
-> 包名：`dsh-dev-memory-3t`。skill 名：`dev-memory`。工具前缀：`devmemory_*`。
+> 包名：`dsh-plugin-memory-3t`。skill 名：`dev-memory`。工具前缀：`devmemory_*`。
 > 定位：**纯本地、零服务依赖、可移植的工作区级三层记忆方案**（插件管机制，skill 管协议）。
 > 参考吸收：Hindsight（知识页自动沉淀）、OpenViking（权限/韧性/失败敞开）、dsh-mnemon（三层拓扑/全局视角）、dsh-plugin-memory（boot 注入/沉淀兜底/零依赖 markdown）。
 
@@ -13,7 +13,7 @@
 - **dsh-plugin-memory** 证明零依赖的 markdown+git 记忆库 + 强注入保障（boot 块、沉淀兜底、主动追忆）在小规模下非常实用 → **我们照搬这套机制，并把它套进三层模型**。
 - **Hindsight/OpenViking** 证明注入时机（pre-step 检查）、权限（0600）、失败敞开（不因记忆故障打断会话）是工程底线 → **写进设计约束**。
 
-产品形状：一个 DSH 插件（`dsh-dev-memory-3t`，纯 TS、零运行时依赖、默认无副进程）+ 一个内嵌 runtime skill（`dev-memory`，可被项目级 `.dsh/skills/` 覆盖）。不需要任何外部服务；语义检索默认用本地 BM25，打开开关后可用本机 Ollama embedding 升级为向量检索。
+产品形状：一个 DSH 插件（`dsh-plugin-memory-3t`，纯 TS、零运行时依赖、默认无副进程）+ 一个内嵌 runtime skill（`dev-memory`，可被项目级 `.dsh/skills/` 覆盖）。不需要任何外部服务；语义检索默认用本地 BM25，打开开关后可用本机 Ollama embedding 升级为向量检索。
 
 ---
 
@@ -301,6 +301,7 @@ L1 流水格式：
 | **v0.5.3** | ✅ 设置面去重：撤销 `settings.plugin.item` 卡片槽位（与 `settings.section` 独立页功能重复、参数两处可见，用户验收要求保留独立页、删除卡片）；参数唯一编辑面 = 独立页（打开面板 + 完整表单），独立页内参数不重复（单份 SECTION_FIELDS）；删除 `client/card.tsx` 与 card 专用 locale，client bundle 29.7kB→25.1kB | 134/134 全绿 0 跳过 + client typecheck + tsdown 构建；打包重装 headless/web 两 profile（0.5.3）归档 `.memtest-pack`；GUI 核对：插件配置无卡片 |
 | **v0.5.4** | ✅ 独立页纯参数面：移除页面顶部「记忆库状态」卡（v0.5 起随设置页引入，其状态行——版本回溯/检索/诊断记录——与下方表单开关主题重合，用户反馈"参数重复"）；删 status fetch、`PanelStatus` 与 status*/state* locale 键，库状态回归只读面板 `/dev-memory/` 查看；设置页 = 打开面板入口 + 参数表单；client bundle 25.1kB→19.6kB | 134/134 全绿 0 跳过 + client typecheck + tsdown 构建；打包重装 headless/web 两 profile（0.5.4）归档 `.memtest-pack`；GUI 核对：设置→记忆管理 无状态卡 |
 | **v0.5.5** | ✅ 表单组首字段重复渲染修复（参数重复**真正根因**）：按用户截图逐行转录定位——每个**分组的第一个参数**出现两次（启用面板/启用诊断记录/启用主动追忆/启用 git 回溯 ×2，同组第二字段如事件保留上限仅 ×1），导航/链接/提示均单份；根因 = `form.tsx` 渲染循环 `rendered.push({ header: groupLabel(field.group), field })` 把组内首个字段**连同标题推入标题条目**、随后 `rendered.push({ field })` 再推一次（v0.5.0 引入，v0.5.3 卡片/v0.5.4 状态卡均为表面现象）；修复：标题条目只携带 header（`{ header }`），渲染处 `field !== undefined` 才输出字段行，rowKey/header key 区分；client bundle 19.6kB | 134/134 全绿 0 跳过 + 双端 typecheck + tsdown 构建；打包重装 headless/web 两 profile（0.5.5）归档 `.memtest-pack`；GUI 核对：每个参数单份、分组标题单份 |
+| **v0.6.0** | ✅ 插件更名：`dsh-dev-memory-3t` → **`dsh-plugin-memory-3t`**——目录与 git 仓库、package.json 包名、插件注册名（`src/index.ts` `name`）、`settings.section` 插槽 id（`PLUGIN_ID`）、client bundle 厂商标识、`cordis.patch.yml` id/name、安装命令（README）与全部文档（DESIGN/team 交接物）全量同步；`test/lifecycle.test.mjs` 的 `source.plugin` 断言同步；tsdown.config.ts 的 PLUGIN_ID 同步。版本升至 0.6.0，旧归档 `dsh-dev-memory-3t-0.*.tgz` 保留为历史产物 | 全量回归（134/134 全绿 0 跳过 + 双端 typecheck + tsdown 构建/重打包）；重新打包 `dsh-plugin-memory-3t-0.6.0.tgz` 归档 `.memtest-pack`；重装 headless/web 两 profile（依赖串改新 tgz + 删旧 node_modules 副本后 pnpm install）；验证安装副本 name=0.6.0/注册名/client bundle 无旧 token；GUI 重启后核对：设置插槽仍以「记忆管理」显示、参数单份 |
 
 **不做的（明确）**：多 provider、云同步、主动追忆聊天（除非用户开）、数据库后端。
 
@@ -313,7 +314,7 @@ L1 流水格式：
 import { Context } from '@deepseek-ai/dsh'      // 实际按 DSH 插件约定 import
 import { readFileSync } from 'node:fs'
 
-export const name = 'dsh-dev-memory-3t'
+export const name = 'dsh-plugin-memory-3t'
 export const inject = ['tools', 'settings', 'systemPrompt', 'skills']
 
 export function apply(ctx: Context, config: Config) {
@@ -370,8 +371,8 @@ export function apply(ctx: Context, config: Config) {
 > 工具面 11 个（v0.1 的 7 个 + history/diff/restore + diag）。设计档案统一收在 `docs/design/`。
 
 ```
-dsh-dev-memory-3t/
-├── package.json            # name: dsh-dev-memory-3t, MIT, 零 runtime deps, peers: @deepseek-ai/cordis 等
+dsh-plugin-memory-3t/
+├── package.json            # name: dsh-plugin-memory-3t, MIT, 零 runtime deps, peers: @deepseek-ai/cordis 等
 ├── cordis.patch.yml        # 按 DSH 约定 bundle patch（- insert 插件条目）
 ├── src/
 │   ├── index.ts            # 入口（生命周期接线：session-start/pre-step/turn-stopping/created + 设置桥接线）

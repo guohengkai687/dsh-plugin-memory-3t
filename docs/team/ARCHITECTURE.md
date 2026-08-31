@@ -1,4 +1,4 @@
-# ARCHITECTURE — dsh-dev-memory-3t v0.1 MVP
+# ARCHITECTURE — dsh-plugin-memory-3t v0.1 MVP
 
 > 撰写：TL（架构阶段降级直写，接口签名均经 TL 源码核实，见 `TL-NOTES.md`）。权威输入：`DESIGN.md` / `SPEC.md` / `context.md` / `TL-NOTES.md`。
 
@@ -6,7 +6,7 @@
 
 | 冲突点 | 裁定 |
 |---|---|
-| `createPluginMessage` 非 DSH 公共 API | 插件自带该 helper（来源 `dsh-mnemon/lib/lifecycle.ts:91`），`source.kind='plugin', plugin='dsh-dev-memory-3t', form='instructions'` |
+| `createPluginMessage` 非 DSH 公共 API | 插件自带该 helper（来源 `dsh-mnemon/lib/lifecycle.ts:91`），`source.kind='plugin', plugin='dsh-plugin-memory-3t', form='instructions'` |
 | tools 注册 | 用 `defineTool()`（指标即 schema），再 `ctx.tools.register(def)`；schema 用 JSON 谱对象，output 必须 object-rooted |
 | value-schema DSL | required 用逐属性 `{ required: true }` 或顶层 `required: [...]`（编译器支持两种；推荐顶层数组，直观） |
 | POSIX 权限 | Windows 无限权语义：目录创建时尽 Node 所能收紧（不做不可靠操作），README 说明 Linux 下自动生效 0700/0600 |

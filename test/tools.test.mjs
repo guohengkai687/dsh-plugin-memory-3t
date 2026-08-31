@@ -64,6 +64,9 @@ test('tools: remember 冒烟（写入并返回 id）', async () => {
     assert.equal(status.embedding.enabled, false)
     assert.equal(status.embedding.degraded, false)
     assert.equal(status.scope, 'workspace')
+    // git 可用环境下 remember 会触发防抖自动提交（异步 git 子进程）；
+    // 若在提交结束前 rmdir 临时库会撞上句柄 EBUSY（Windows 时序问题），先 flush 等提交完成。
+    await store.flushVcs('测试清理：等待自动提交完成')
   } finally {
     await rm(ws, { recursive: true, force: true })
   }

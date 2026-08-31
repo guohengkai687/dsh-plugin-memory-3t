@@ -1,4 +1,4 @@
-# dsh-dev-memory-3t
+# dsh-plugin-memory-3t
 
 本地三层记忆插件（DSH），零运行时依赖、无外部服务。
 
@@ -16,7 +16,7 @@
 npm install && npm run build
 
 # 2. 安装到 DSH profile（cordis.patch.yml 经 package.json 的 dsh.bundle.patch 声明）
-dsh plugin --profile <profile> add dsh-dev-memory-3t
+dsh plugin --profile <profile> add dsh-plugin-memory-3t
 # 或手动合并 cordis.patch.yml 到 profile 的 patch（bundle 层 insert）
 
 # 3. 重启 DSH 会话。记忆库默认建在会话工作区的 .memory/ 目录
@@ -290,6 +290,7 @@ npm test              # build + node --test（Windows 沙箱下用 --test-isolat
 - ✅ v0.5.3 完成：设置面去重——「插件配置」选项卡里的可配置卡片（`settings.plugin.item`）与「记忆管理」独立页功能重复、参数两处可见，故删除卡片槽位，独立页（`settings.section`）成为参数唯一编辑面；card.tsx 移除、client bundle 缩小（29.7kB→25.1kB）
 - ✅ v0.5.4 完成：独立页纯参数面——移除页面顶部「记忆库状态」卡（状态行与表单开关主题重合造成"参数重复"观感），库状态回归只读面板 `/dev-memory/`；设置页只剩打开面板入口 + 参数表单，client bundle 再缩至 19.6kB
 - ✅ v0.5.5 完成（参数重复真正根因）：`form.tsx` 渲染循环把分组标题条目与组内首个字段一起 push，导致每个分组的第一个参数渲染两次（v0.5.0 引入，前述"状态卡/卡片"皆为表面现象）；修复为标题条目只含 header、字段行单独渲染，每个参数只出现一次
+- ✅ v0.6.0 完成（插件更名）：`dsh-dev-memory-3t` → **`dsh-plugin-memory-3t`**——目录与 git 仓库、package.json 包名、插件注册名（`src/index.ts` `name`）、设置 `settings.section` 插槽 id（`PLUGIN_ID`）、client bundle 标识、`cordis.patch.yml` id/name、安装命令与全部文档（README/DESIGN/team）同步更名；测试断言同步（`source.plugin`）；版本升至 0.6.0 打包归档 `.memtest-pack` 并重装 headless/web 两 profile（旧归档 `dsh-dev-memory-3t-0.*.tgz` 保留为历史产物）
 - v0.6（候选）：多库并存切换（named libraries）、recall 结果缓存与面板历史、scope 迁移工具（workspace→user 搬家）
 
 ## License

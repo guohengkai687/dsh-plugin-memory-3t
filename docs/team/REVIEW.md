@@ -1,4 +1,4 @@
-# REVIEW — dsh-dev-memory-3t v0.1（审查记录）
+# REVIEW — dsh-plugin-memory-3t v0.1（审查记录）
 
 > 审查方式：架构师/工程师子代理在会话环境中无法产出文件（两次尝试均无输出），
 > 按 skill 降级预案由 TL 以串行角色完成审查（标准轴 + 规格轴，按 REVIEW-GUIDE 执行）。
@@ -21,7 +21,7 @@
 
 - A1 TS strict：`npm run typecheck` 零错误 ✅
 - A2 零运行时依赖：`dependencies` 为空；devDeps 仅 typescript/@types/node ✅
-- A3 命名一致性：src 无 `memory3t`/`mnemon_` 残留；7 工具 `devmemory_*`、skill `dev-memory`、boot `dev-memory-boot`、包名 `dsh-dev-memory-3t` ✅
+- A3 命名一致性：src 无 `memory3t`/`mnemon_` 残留；7 工具 `devmemory_*`、skill `dev-memory`、boot `dev-memory-boot`、包名 `dsh-plugin-memory-3t` ✅
 - A4 结构：无 TODO 占位；模块职责单一（config/paths/frontmatter/indexer/store/digest/render/tools/skill/index）✅
 - A5 fail-open：store.init / digest 全流程 / pre-step / session-start / 工具注册均 try/catch 降级，不 rethrow 到会话 ✅（digest fail-open 有异常注入测试）
 - A6 安全：所有路径参数过 safeJoin / note relPath 校验；audit.jsonl；无密钥进 prompt ✅

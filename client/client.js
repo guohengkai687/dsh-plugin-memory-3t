@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "dsh-dev-memory-3t",
+	id: "dsh-plugin-memory-3t",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -585,7 +585,7 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/index.tsx
 		/** 本客户端插件的完整 id（与包名一致，用于 dsh.client 发现与 __ModuleLoader__ id）。 */
-		const PLUGIN_ID = "dsh-dev-memory-3t";
+		const PLUGIN_ID = "dsh-plugin-memory-3t";
 		/** settings.section 导航顺序：默认 General/Models 之后、插件市场(40)之后。 */
 		const SECTION_ORDER = 46;
 		const name = PLUGIN_ID;

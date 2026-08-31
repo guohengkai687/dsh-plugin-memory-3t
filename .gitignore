@@ -3,3 +3,5 @@ dist/
 *.tsbuildinfo
 .npm-cache/
 test-run.log
+test-*.log
+
