@@ -1,0 +1,216 @@
+/**
+ * 配置：类型、默认值与合并。
+ *
+ * v0.1 配置面刻意收敛（对比 mnemon 的 57 项）：只有注入预算三档、存储根、
+ * digest/recall/索引参数与两个开关位。所有数值均做非负钳制。
+ */
+
+export interface EmbeddingConfig {
+  /** 向量检索开关。默认 false（纯 BM25）；开启后 L2/L3 写入同步生成向量，检索走向量+BM25 融合。 */
+  enabled: boolean
+  /** Ollama HTTP API 地址（默认 http://localhost:11434）；以 /api/embeddings 等路径访问。 */
+  endpoint: string
+  /** 嵌入模型（默认 nomic-embed-text，参考 mnemon 默认值）。 */
+  model: string
+  /** 单次 embedding 调用超时（毫秒，默认 3000）。超时/不可用自动降级回 BM25，不打断会话。 */
+  timeoutMs: number
+}
+
+export interface DigestConfig {
+  /** 会话消息数达到该值即触发 digest（配合收尾语 / 显式 consolidate）。 */
+  maxMessages: number
+  /** 单次 digest 最多提升到 L3 的条目数，超出转 L2 笔记。 */
+  maxPromote: number
+  /** digest 失败后的补做次数上限，防止死循环。 */
+  maxRetries: number
+}
+
+export interface RecallConfig {
+  /** 单次查询默认返回条数上限（每层）。 */
+  defaultLimit: number
+  /** 注入 top-k 的最低 salience 门槛。 */
+  minSalience: number
+  /** 视为"高相关"的分数门槛（用于 pre-step 提醒）。 */
+  highScore: number
+}
+
+export interface DedupeConfig {
+  /** 与现有 L3 条目 BM25 分数 ≥ 该值视为重复。 */
+  threshold: number
+}
+
+export interface IndexConfig {
+  /** 写入次数超过该值后，下次查询前自动重建 BM25 倒排索引。 */
+  rebuildAfterWrites: number
+}
+
+export interface VcsIdentityConfig {
+  /** 本地 git 身份兜底（不依赖用户全局配置）。 */
+  name: string
+  email: string
+}
+
+export interface DiagConfig {
+  /** 诊断记录开关（v0.4，默认 true）：记录调用异常与不符合预期的行为到 <库>/diag/events.jsonl。 */
+  enabled: boolean
+  /** 事件保留上限（默认 2000；0 = 不限）。超过 2 倍上限自动压缩，只保留最新 maxEvents 条。 */
+  maxEvents: number
+}
+
+export interface WebUiConfig {
+  /**
+   * 只读 WebUI 面板开关（v0.5，默认 true）：false 时不再注册 /dev-memory 路由。
+   * 可在 DSH 设置页「记忆管理」里实时切换（关 = 路由摘除，开 = 重新挂载）。
+   */
+  enabled: boolean
+}
+
+export interface VcsConfig {
+  /** 版本回溯开关；false 时完全跳过 git（等同 v0.1 行为）。 */
+  enabled: boolean
+  /** 事件驱动自动提交（防抖 + 计数合并）；false 时仅边界事件提交。 */
+  autoCommit: boolean
+  /** 防抖窗口（毫秒）：窗口内无新写入才合并提交。 */
+  debounceMs: number
+  /** 写入计数阈值：未提交写入达到该值立即提交。 */
+  batch: number
+  /** 初始化分支名。 */
+  branch: string
+  identity: VcsIdentityConfig
+  /**
+   * 分离 git 目录（--separate-git-dir）：绝对路径原样，相对路径基于记忆库根解析。
+   * 默认 undefined = 嵌套 <库>/.git。
+   */
+  gitDir?: string
+}
+
+/** 记忆库粒度：workspace（每工作区一库，默认）/ user（全局一库，v0.3）。 */
+export type Scope = 'workspace' | 'user'
+
+export interface Config {
+  /** 记忆库根。相对路径基于基准目录解析：workspace 基准 = 会话工作区根；user 基准 = 用户主目录；绝对路径原样使用。 */
+  storageDir: string
+  /** 记忆库粒度（v0.3）：workspace=每工作区一库；user=跨工作区共享一库（默认 ~/.memory）。 */
+  scope: Scope
+  /**
+   * 工作区根覆盖（v0.3.1）：置为非空路径时，workspace 粒度固定以该目录为基准解析 storageDir
+   * （忽略会话工作区，用于显式钉死库位 / 多工作区共存场景）；空串 = 自动——
+   * 按会话真实工作区根（session.header.cwd）解析，缺省回退进程 cwd。
+   */
+  workspaceDir: string
+  maxBootTokens: number
+  maxRuntimeTokens: number
+  maxSpaceTokens: number
+  embedding: EmbeddingConfig
+  digest: DigestConfig
+  recall: RecallConfig
+  dedupe: DedupeConfig
+  index: IndexConfig
+  /** 主动追忆（recall nudge，v0.3 实现）：默认关；开启后按 30–240 分钟随机间隔经 agent.followup 温和提醒一次。 */
+  recallNudge: { enabled: boolean }
+  /** git 版本回溯管理（v0.2 新增）。 */
+  vcs: VcsConfig
+  /** 诊断与异常记录（v0.4 新增）：记录调用异常与不符合预期的行为，供定期审查优化插件。 */
+  diag: DiagConfig
+  /** 只读 WebUI 面板（v0.5 新增开关）：false 时摘除 /dev-memory 路由。 */
+  webui: WebUiConfig
+}
+
+export const DEFAULT_CONFIG: Config = {
+  storageDir: '.memory',
+  scope: 'workspace',
+  workspaceDir: '',
+  maxBootTokens: 600,
+  maxRuntimeTokens: 1200,
+  maxSpaceTokens: 800,
+  embedding: { enabled: false, endpoint: 'http://localhost:11434', model: 'nomic-embed-text', timeoutMs: 3000 },
+  digest: { maxMessages: 24, maxPromote: 20, maxRetries: 2 },
+  recall: { defaultLimit: 10, minSalience: 0.25, highScore: 0.6 },
+  dedupe: { threshold: 0.55 },
+  index: { rebuildAfterWrites: 50 },
+  recallNudge: { enabled: false },
+  vcs: {
+    enabled: true,
+    autoCommit: true,
+    debounceMs: 1000,
+    batch: 8,
+    branch: 'main',
+    identity: { name: 'dsh-dev-memory', email: 'dev-memory@dsh.local' },
+  },
+  diag: { enabled: true, maxEvents: 2000 },
+  webui: { enabled: true },
+}
+
+function clampNonNegative(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  return n >= 0 ? n : fallback
+}
+
+/**
+ * 合并用户配置（可部分提供、可嵌套），缺失字段取默认值，数值非负钳制。
+ * @param partial - 来自 cordis settings 的部分配置对象。
+ */
+export function mergeConfig(partial: unknown): Config {
+  const p = (partial ?? {}) as Record<string, unknown>
+  const digest = (p.digest ?? {}) as Record<string, unknown>
+  const recall = (p.recall ?? {}) as Record<string, unknown>
+  const dedupe = (p.dedupe ?? {}) as Record<string, unknown>
+  const index = (p.index ?? {}) as Record<string, unknown>
+  const embedding = (p.embedding ?? {}) as Record<string, unknown>
+  const recallNudge = (p.recallNudge ?? {}) as Record<string, unknown>
+  const vcs = (p.vcs ?? {}) as Record<string, unknown>
+  const vcsIdentity = (vcs.identity ?? {}) as Record<string, unknown>
+  const diag = (p.diag ?? {}) as Record<string, unknown>
+  const webui = (p.webui ?? {}) as Record<string, unknown>
+  const defaultIdentity = DEFAULT_CONFIG.vcs.identity
+  const branch = typeof vcs.branch === 'string' && /^[a-zA-Z0-9._/-]+$/.test(vcs.branch.trim()) ? vcs.branch.trim() : DEFAULT_CONFIG.vcs.branch
+  const vcsOut: VcsConfig = {
+    enabled: vcs.enabled !== false,
+    autoCommit: vcs.autoCommit !== false,
+    debounceMs: clampNonNegative(vcs.debounceMs, DEFAULT_CONFIG.vcs.debounceMs),
+    batch: Math.max(1, clampNonNegative(vcs.batch, DEFAULT_CONFIG.vcs.batch)),
+    branch,
+    identity: {
+      name: typeof vcsIdentity.name === 'string' && vcsIdentity.name.trim() !== '' ? vcsIdentity.name.trim() : defaultIdentity.name,
+      email: typeof vcsIdentity.email === 'string' && vcsIdentity.email.trim() !== '' ? vcsIdentity.email.trim() : defaultIdentity.email,
+    },
+    ...(typeof vcs.gitDir === 'string' && vcs.gitDir.trim() !== '' ? { gitDir: vcs.gitDir.trim() } : {}),
+  }
+  return {
+    storageDir: typeof p.storageDir === 'string' && p.storageDir.length > 0 ? p.storageDir : DEFAULT_CONFIG.storageDir,
+    scope: p.scope === 'user' ? 'user' : 'workspace',
+    workspaceDir:
+      typeof p.workspaceDir === 'string' && p.workspaceDir.trim() !== '' ? p.workspaceDir.trim() : DEFAULT_CONFIG.workspaceDir,
+    maxBootTokens: clampNonNegative(p.maxBootTokens, DEFAULT_CONFIG.maxBootTokens),
+    maxRuntimeTokens: clampNonNegative(p.maxRuntimeTokens, DEFAULT_CONFIG.maxRuntimeTokens),
+    maxSpaceTokens: clampNonNegative(p.maxSpaceTokens, DEFAULT_CONFIG.maxSpaceTokens),
+    embedding: {
+      enabled: embedding.enabled === true,
+      endpoint:
+        typeof embedding.endpoint === 'string' && /^https?:\/\//i.test(embedding.endpoint.trim())
+          ? embedding.endpoint.trim().replace(/\/+$/, '')
+          : DEFAULT_CONFIG.embedding.endpoint,
+      model: typeof embedding.model === 'string' && embedding.model.trim() !== '' ? embedding.model.trim() : DEFAULT_CONFIG.embedding.model,
+      timeoutMs: clampNonNegative(embedding.timeoutMs, DEFAULT_CONFIG.embedding.timeoutMs),
+    },
+    digest: {
+      maxMessages: clampNonNegative(digest.maxMessages, DEFAULT_CONFIG.digest.maxMessages),
+      maxPromote: clampNonNegative(digest.maxPromote, DEFAULT_CONFIG.digest.maxPromote),
+      maxRetries: clampNonNegative(digest.maxRetries, DEFAULT_CONFIG.digest.maxRetries),
+    },
+    recall: {
+      defaultLimit: clampNonNegative(recall.defaultLimit, DEFAULT_CONFIG.recall.defaultLimit),
+      minSalience: clampNonNegative(recall.minSalience, DEFAULT_CONFIG.recall.minSalience),
+      highScore: clampNonNegative(recall.highScore, DEFAULT_CONFIG.recall.highScore),
+    },
+    dedupe: { threshold: clampNonNegative(dedupe.threshold, DEFAULT_CONFIG.dedupe.threshold) },
+    index: { rebuildAfterWrites: clampNonNegative(index.rebuildAfterWrites, DEFAULT_CONFIG.index.rebuildAfterWrites) },
+    recallNudge: { enabled: recallNudge.enabled === true },
+    vcs: vcsOut,
+    diag: {
+      enabled: diag.enabled !== false,
+      maxEvents: Math.max(0, Math.floor(clampNonNegative(diag.maxEvents, DEFAULT_CONFIG.diag.maxEvents))),
+    },
+    webui: { enabled: webui.enabled !== false },
+  }
+}

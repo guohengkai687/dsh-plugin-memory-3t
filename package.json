@@ -1,0 +1,65 @@
+{
+  "name": "dsh-dev-memory-3t",
+  "version": "0.5.5",
+  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实，git 版本回溯 + Ollama 向量检索（可选）+ pack/unpack 迁移 + 只读 WebUI 面板 + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 工作区根按会话真实工作区解析 + 诊断与异常记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5，WebUI 与参数可在设置里管理、live 生效；v0.5.3 起参数唯一编辑面为独立页、删除插件配置选项卡内的重复卡片，v0.5.4 独立页移除状态卡成为纯参数面，v0.5.5 修复表单组首字段重复渲染——分组标题条目不再携带字段，每个参数只渲染一次），纯本地零硬依赖（BM25/digest/dev-memory skill；设置桥按需动态加载 dsh-settings）",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dev-memory-pack": "./bin/dev-memory-pack.mjs"
+  },
+  "files": [
+    "dist",
+    "client",
+    "skills",
+    "bin",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
+    "schemastery": "^3.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:client": "tsdown --config tsdown.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 \"test/*.test.mjs\""
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-client-locale": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.2",
+    "@types/node": "^24.13.3",
+    "@types/react": "^18.3.12",
+    "react": "^18.3.1",
+    "tsdown": "^0.22.14",
+    "typescript": "^5.9.2"
+  }
+}

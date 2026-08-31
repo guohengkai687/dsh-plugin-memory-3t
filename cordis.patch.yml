@@ -1,0 +1,31 @@
+# dsh-dev-memory-3t bundle layer.
+#
+# Declared via the `dsh.bundle.patch` manifest key in package.json, so
+# `dsh plugin add dsh-dev-memory-3t` (and the dsh-market install flow)
+# mounts this insert automatically. User-level overrides live in DSH
+# settings (插件配置项见 README 配置表)。
+- insert:
+    - id: dsh-dev-memory-3t
+      name: dsh-dev-memory-3t
+      config:
+        storageDir: .memory
+        scope: workspace
+        maxBootTokens: 600
+        maxRuntimeTokens: 1200
+        maxSpaceTokens: 800
+        embedding:
+          enabled: false
+        digest:
+          maxMessages: 24
+          maxPromote: 20
+          maxRetries: 2
+        recall:
+          defaultLimit: 10
+          minSalience: 0.25
+          highScore: 0.6
+        dedupe:
+          threshold: 0.55
+        index:
+          rebuildAfterWrites: 50
+        recallNudge:
+          enabled: false

@@ -1,0 +1,96 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { DEFAULT_CONFIG, mergeConfig } from '../dist/config.js'
+
+test('config: 默认值完整', () => {
+  assert.equal(DEFAULT_CONFIG.storageDir, '.memory')
+  assert.equal(DEFAULT_CONFIG.scope, 'workspace')
+  assert.equal(DEFAULT_CONFIG.maxBootTokens, 600)
+  assert.equal(DEFAULT_CONFIG.maxRuntimeTokens, 1200)
+  assert.equal(DEFAULT_CONFIG.maxSpaceTokens, 800)
+  assert.equal(DEFAULT_CONFIG.embedding.enabled, false)
+  assert.equal(DEFAULT_CONFIG.recallNudge.enabled, false)
+  assert.equal(DEFAULT_CONFIG.digest.maxRetries, 2)
+  assert.equal(DEFAULT_CONFIG.dedupe.threshold, 0.55)
+  // v0.4：诊断默认开、上限 2000
+  assert.equal(DEFAULT_CONFIG.diag.enabled, true)
+  assert.equal(DEFAULT_CONFIG.diag.maxEvents, 2000)
+  // v0.5：WebUI 面板开关默认开
+  assert.equal(DEFAULT_CONFIG.webui.enabled, true)
+})
+
+test('config: 空配置取默认值', () => {
+  const c = mergeConfig(undefined)
+  assert.deepEqual(c, DEFAULT_CONFIG)
+})
+
+test('config: 部分覆盖保留其余默认', () => {
+  const c = mergeConfig({ storageDir: '/abs/path', maxBootTokens: 300 })
+  assert.equal(c.storageDir, '/abs/path')
+  assert.equal(c.maxBootTokens, 300)
+  assert.equal(c.maxRuntimeTokens, 1200)
+})
+
+test('config: 嵌套覆盖', () => {
+  const c = mergeConfig({ digest: { maxMessages: 10 }, recall: { highScore: 0.8 } })
+  assert.equal(c.digest.maxMessages, 10)
+  assert.equal(c.digest.maxPromote, 20)
+  assert.equal(c.recall.highScore, 0.8)
+})
+
+test('config: 负数/非法数值钳制回默认', () => {
+  const c = mergeConfig({ maxBootTokens: -5, maxRuntimeTokens: 'x', digest: { maxMessages: -1 } })
+  assert.equal(c.maxBootTokens, 600)
+  assert.equal(c.maxRuntimeTokens, 1200)
+  assert.equal(c.digest.maxMessages, 24)
+})
+
+test('config: scope 为 user 时开启全局库，非法值回退 workspace', () => {
+  assert.equal(mergeConfig({ scope: 'user' }).scope, 'user')
+  assert.equal(mergeConfig({ scope: 'bogus' }).scope, 'workspace')
+  assert.equal(mergeConfig({ scope: 42 }).scope, 'workspace')
+})
+
+test('config: embedding 默认（endpoint/model/timeoutMs）', () => {
+  assert.equal(DEFAULT_CONFIG.embedding.enabled, false)
+  assert.equal(DEFAULT_CONFIG.embedding.endpoint, 'http://localhost:11434')
+  assert.equal(DEFAULT_CONFIG.embedding.model, 'nomic-embed-text')
+  assert.equal(DEFAULT_CONFIG.embedding.timeoutMs, 3000)
+})
+
+test('config: embedding 合法覆盖 + 非法回退', () => {
+  const c = mergeConfig({
+    embedding: {
+      enabled: true,
+      endpoint: 'https://ollama.example.com:11434/',
+      model: 'bge-m3',
+      timeoutMs: 5000,
+    },
+  })
+  assert.deepEqual(c.embedding, {
+    enabled: true,
+    endpoint: 'https://ollama.example.com:11434',
+    model: 'bge-m3',
+    timeoutMs: 5000,
+  })
+  const bad = mergeConfig({ embedding: { endpoint: 'not-a-url', model: '', timeoutMs: -1 } })
+  assert.equal(bad.embedding.endpoint, 'http://localhost:11434')
+  assert.equal(bad.embedding.model, 'nomic-embed-text')
+  assert.equal(bad.embedding.timeoutMs, 3000)
+})
+
+test('config: diag 合法覆盖 + 非法钳制（v0.4）', () => {
+  const c = mergeConfig({ diag: { enabled: false, maxEvents: 500 } })
+  assert.equal(c.diag.enabled, false)
+  assert.equal(c.diag.maxEvents, 500)
+  // 负数/非法数值钳制回默认（与其余配置一致）；0 = 不限
+  assert.equal(mergeConfig({ diag: { maxEvents: -3 } }).diag.maxEvents, 2000)
+  assert.equal(mergeConfig({ diag: { maxEvents: 'x' } }).diag.maxEvents, 2000)
+  assert.equal(mergeConfig({ diag: { maxEvents: 0 } }).diag.maxEvents, 0)
+})
+
+test('config: webui 面板开关（v0.5）', () => {
+  assert.equal(mergeConfig({ webui: { enabled: false } }).webui.enabled, false)
+  assert.equal(mergeConfig({ webui: {} }).webui.enabled, true)
+  assert.equal(mergeConfig({ webui: 'x' }).webui.enabled, true)
+})
