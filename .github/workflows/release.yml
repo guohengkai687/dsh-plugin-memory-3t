@@ -44,7 +44,9 @@ jobs:
         run: npm run test
 
       - name: Pack publish tarball
-        run: npm pack --pack-destination ./dist-tarball
+        run: |
+          mkdir -p dist-tarball
+          npm pack --pack-destination ./dist-tarball
 
       - name: Upload tarball to GitHub Release
         uses: softprops/action-gh-release@v2
