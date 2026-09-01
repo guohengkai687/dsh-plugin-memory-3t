@@ -27,7 +27,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 与本地开发环境（v24）保持一致；--test-isolation 需要较新的 Node
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
