@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-memory-3t",
-  "version": "0.6.0",
-  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实，git 版本回溯 + Ollama 向量检索（可选）+ pack/unpack 迁移 + 只读 WebUI 面板 + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 工作区根按会话真实工作区解析 + 诊断与异常记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5，WebUI 与参数可在设置里管理、live 生效；v0.5.3 起参数唯一编辑面为独立页、删除插件配置选项卡内的重复卡片，v0.5.4 独立页移除状态卡成为纯参数面，v0.5.5 修复表单组首字段重复渲染——分组标题条目不再携带字段，每个参数只渲染一次）；v0.6.0 插件更名 dsh-plugin-memory-3t——目录/包名/注册名/设置插槽 id/client bundle 标识/安装命令与文档全量同步），纯本地零硬依赖（BM25/digest/dev-memory skill；设置桥按需动态加载 dsh-settings）",
+  "version": "0.6.1",
+  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实，git 版本回溯 + Ollama 向量检索（可选）+ pack/unpack 迁移 + 只读 WebUI 面板 + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 工作区根按会话真实工作区解析 + 诊断与异常记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5，WebUI 与参数可在设置里管理、live 生效；v0.5.3 起参数唯一编辑面为独立页、删除插件配置选项卡内的重复卡片，v0.5.4 独立页移除状态卡成为纯参数面，v0.5.5 修复表单组首字段重复渲染——分组标题条目不再携带字段，每个参数只渲染一次）；v0.6.0 插件更名 dsh-plugin-memory-3t——目录/包名/注册名/设置插槽 id/client bundle 标识/安装命令与文档全量同步；v0.6.1 修复索引长期陈旧导致召回恒为空：脏标记持久化 index.json.dirty 跨进程生效、阈值重建死代码修复、索引键改 docKey（修向量融合键匹配）、schemaVersion 升 2 旧快照判废、空召回自愈 + status 暴露 indexStale），纯本地零硬依赖（BM25/digest/dev-memory skill；设置桥按需动态加载 dsh-settings）",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -326,7 +326,8 @@ export class GitVcs {
   /** 库内 .gitignore：忽略可重建的派生物（index.json、vectors/）与库内 gitDir 元数据、诊断记录 diag/。 */
   private async ensureIgnore(): Promise<void> {
     const path = resolve(this.root, '.gitignore')
-    const lines = ['index.json', 'vectors/', 'diag/']
+    // v0.6.1：index.json.dirty 为跨进程持久化脏标记（派生物，不进版本历史）
+    const lines = ['index.json', 'index.json.dirty', 'vectors/', 'diag/']
     const gitDir = this.gitDirAbsolute()
     if (gitDir !== null && gitDir !== this.root) {
       const rel = relative(this.root, gitDir)

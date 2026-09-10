@@ -77,6 +77,10 @@ export interface StoreStatusSnapshot {
   counts: { l1: number; l2: number; l3: number }
   lastDigestAt: string | null
   indexDirty: number
+  /** v0.6.1：当前快照文档数（未加载过则读磁盘）。 */
+  indexDocCount: number | null
+  /** v0.6.1：快照文档数与库内实际是否不一致（陈旧/超前）。 */
+  indexStale: boolean
   firstRun: boolean
   /** git 版本回溯状态（v0.2）。git 不可用时自动降级。 */
   vcs: VcsStatus
@@ -457,7 +461,8 @@ export class MemoryStore {
       updated: new Date().toISOString(),
     }
     await this.writeEntry(next)
-    this.index.markDirty()
+    // v0.6.1：触碰只改元数据（salience/accesses），不进倒排正文 → 不落持久化脏标记
+    this.index.markMetadataDirty()
     this.vcsRecord('l3', `touch ${id}`)
   }
 
@@ -654,6 +659,29 @@ export class MemoryStore {
     return docs
   }
 
+  /** 轻量文档计数（只列目录不读正文）：空召回自愈 / status 校验用。 */
+  private async countDocsCheap(): Promise<number> {
+    let n = 0
+    try {
+      n += (await readdir(this.dirs.spaces)).filter((x) => x.endsWith('.md')).length
+    } catch {
+      /* ignore */
+    }
+    try {
+      const rels: string[] = []
+      await this.listMarkdownFiles(this.dirs.docs, '', rels)
+      n += rels.length
+    } catch {
+      /* ignore */
+    }
+    try {
+      n += (await readdir(this.dirs.runtime)).filter((x) => x.endsWith('.md')).length
+    } catch {
+      /* ignore */
+    }
+    return n
+  }
+
   /**
    * 跨层回忆查询（统一读入口）。
    * 命中 L3 条目时默认提升 accesses/salience（touch）。
@@ -661,8 +689,27 @@ export class MemoryStore {
   async recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
     const maxResults = options.maxResults ?? this.config.recall.defaultLimit
     const layers = options.layers ?? ['l1', 'l2', 'l3']
-    const index = await this.index.get(() => this.scanDocs())
+    let index = await this.index.get(() => this.scanDocs())
     let result = searchIndex(index, query, maxResults, layers)
+    // v0.6.1 空召回自愈：三层全空且库内实际文档数多于快照 → 快照陈旧（如脏标记落盘失败），
+    // 强制重建一次并重试；若自愈后有命中则记一条诊断，让此类故障可见。
+    if (result.l1.length === 0 && result.l2.length === 0 && result.l3.length === 0) {
+      const actual = await this.countDocsCheap()
+      const snapshot = index.docCount
+      if (actual > snapshot) {
+        index = await this.index.rebuild(() => this.scanDocs())
+        result = searchIndex(index, query, maxResults, layers)
+        if (result.l1.length > 0 || result.l2.length > 0 || result.l3.length > 0) {
+          void this.diag
+            .record({
+              level: 'unexpected',
+              origin: 'index',
+              message: `索引快照陈旧：快照 ${snapshot} 篇 vs 库内 ${actual} 篇，空召回已自动重建恢复`,
+            })
+            .catch(() => undefined)
+        }
+      }
+    }
     if (this.embedding.enabled) {
       result = await this.fuseVectors(query, result, maxResults, layers)
     }
@@ -828,6 +875,7 @@ export class MemoryStore {
     } catch {
       /* ignore */
     }
+    const snap = await this.index.snapshotDocCount()
     return {
       ready: true,
       root: this.root,
@@ -835,6 +883,8 @@ export class MemoryStore {
       counts: { l1, l2, l3 },
       lastDigestAt: this.digestState.lastRunAt,
       indexDirty: this.index.dirtyCount,
+      indexDocCount: snap,
+      indexStale: snap === null ? l1 + l2 + l3 > 0 : snap !== l1 + l2 + l3,
       firstRun: l3 === 0 && l2 === 0 && l1 === 0,
       vcs: await this.vcs.status(),
       embedding: await this.embeddingStatus(),
