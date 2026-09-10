@@ -3,7 +3,18 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { apply } from '../dist/index.js'
+
+/** git 可用性（集成测试用；无 git 环境跳过）。 */
+const GIT_OK = (() => {
+  try {
+    const r = spawnSync('git', ['--version'], { encoding: 'utf8' })
+    return r.status === 0 && /^git version /u.test((r.stdout ?? '').trim())
+  } catch {
+    return false
+  }
+})()
 
 /** 等待后台异步写入（init / appendRuntime）静默，避免与 rm 竞争。 */
 async function settle() {
@@ -221,5 +232,57 @@ test('lifecycle: subagent 继承父会话视图（L1 回放 / L3 top-k）', asyn
     process.chdir(cwd)
     await settle()
     await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle: 库根 A→B→A 切换后复用已初始化的库（v0.6.3 回归：vcs 不得静默降级）', { skip: !GIT_OK && '本机无 git，跳过集成测试' }, async () => {
+  const wsA = await mkdtemp(join(tmpdir(), 'dm3t-swA-'))
+  const wsB = await mkdtemp(join(tmpdir(), 'dm3t-swB-'))
+  const cwd = process.cwd()
+  const rmOpts = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
+  try {
+    process.chdir(wsA)
+    const { ctx, calls } = makeStubContext()
+    // 本用例的观测点就是 vcs 是否被 init，所以必须开启 vcs（其余 lifecycle 用例都关着）
+    apply(ctx, { storageDir: '.memory', vcs: { debounceMs: 50 } })
+
+    const sessionStart = calls.on.get('agent/session-start')
+    const statusTool = calls.tools.find((t) => t.name === 'devmemory_status')
+    const agentAt = (dir) => ({ id: 'a:' + dir, session: { header: { cwd: dir } } })
+    const statusFor = async (dir) => {
+      const s = await statusTool.execute({}, {})
+      return s.root === join(dir, '.memory') ? s : null
+    }
+    const waitReady = async (dir) => {
+      for (let i = 0; i < 80; i += 1) {
+        const s = await statusFor(dir)
+        if (s !== null && s.vcs.ready === true) return true
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      return false
+    }
+
+    // 进入 A：完成 init
+    await sessionStart({ agent: agentAt(wsA), source: 'startup' })
+    assert.ok(await waitReady(wsA), '首次进入 A 应完成 vcs 初始化')
+
+    // 切到 B：另一个库根，独立 init
+    await sessionStart({ agent: agentAt(wsB), source: 'startup' })
+    assert.ok(await waitReady(wsB), '切到 B 应完成 vcs 初始化')
+
+    // 切回 A：修复前这里会为 A 新建实例却跳过 init → available/ready 恒为 false 且 lastError 为 null
+    await sessionStart({ agent: agentAt(wsA), source: 'startup' })
+    const back = await statusFor(wsA)
+    assert.ok(back !== null, '应切回 A 的库根')
+    assert.equal(back.vcs.available, true, '回到 A 后 vcs 应可用（复用已初始化实例）')
+    assert.equal(back.vcs.ready, true, '回到 A 后 vcs 应就绪，不得静默降级')
+    assert.equal(back.vcs.degraded, false)
+    assert.equal(back.vcs.lastError, null)
+    assert.ok(Number(back.vcs.commits) >= 1, '回到 A 后应能读到提交历史')
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(wsA, rmOpts)
+    await rm(wsB, rmOpts)
   }
 })

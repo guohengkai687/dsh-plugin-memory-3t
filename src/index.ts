@@ -136,10 +136,19 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   // ------------------------------------------------------------ 记忆库（按工作区懒解析，v0.3.1）
 
   let active: { store: MemoryStore; engine: DigestEngine; root: string } | null = null
-  const initializing = new Set<string>()
+  /**
+   * 库根 → 已建实例的缓存（v0.6.3）。
+   *
+   * 必须缓存**实例本身**，不能只记"该根已 init 过"：库根 A→B→A 来回切换时，
+   * 后者会为 A 新建一个实例却跳过它的 init()，使该实例的 GitVcs 永远停在默认值
+   * （available=false / ready=false，且 lastError 为 null），自动提交被静默吞掉、
+   * diag 也无任何记录。缓存实例则保证每个根只有一份实现，复访直接复用。
+   */
+  const storeCache = new Map<string, { store: MemoryStore; engine: DigestEngine }>()
 
   /**
-   * 取当前工作区的记忆库。会话工作区根与已建库根不同时切换（每个库根只 init 一次，fail-open）。
+   * 取当前工作区的记忆库。会话工作区根与已建库根不同时切换（每个库根只建一次实例、
+   * 只 init 一次，fail-open）。
    * sessionCwd 缺省：
    * - 已建库 → 沿用当前库（工具/边界回调在会话内执行，会话启动已绑定正确工作区；
    *   绝不用进程 cwd 把库"切回去"）；
@@ -150,24 +159,27 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     const workspaceRoot = pinnedWorkspace ?? sessionCwd ?? process.cwd()
     const root = resolveRoot(workspaceRoot, config.storageDir, config.scope)
     if (active !== null && active.root === root) return active
+    const cached = storeCache.get(root)
+    if (cached !== undefined) {
+      active = { store: cached.store, engine: cached.engine, root }
+      return active
+    }
     const store = new MemoryStore(workspaceRoot, config)
     const engine = new DigestEngine(store)
+    storeCache.set(root, { store, engine })
     active = { store, engine, root }
-    if (!initializing.has(root)) {
-      initializing.add(root)
-      void store
-        .init()
-        .then(async () => {
-          cachedStatus = await store.status()
-          ctx.logger.info?.('[dev-memory] 记忆库就绪: ' + store.root)
-        })
-        .catch((error: unknown) => {
-          if (!initWarned) {
-            initWarned = true
-            warn(`[dev-memory] 记忆库初始化失败（已降级为不注入记忆）: ${error instanceof Error ? error.message : String(error)}`)
-          }
-        })
-    }
+    void store
+      .init()
+      .then(async () => {
+        cachedStatus = await store.status()
+        ctx.logger.info?.('[dev-memory] 记忆库就绪: ' + store.root)
+      })
+      .catch((error: unknown) => {
+        if (!initWarned) {
+          initWarned = true
+          warn(`[dev-memory] 记忆库初始化失败（已降级为不注入记忆）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      })
     return active
   }
 
