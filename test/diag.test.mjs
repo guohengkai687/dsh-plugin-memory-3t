@@ -225,6 +225,14 @@ test('diag 集成: store.init 建 diag 目录；工具异常自动入记 + usage
     assert.equal(st.diag.total, 1)
     assert.equal(st.diag.recent.length, 1)
 
+    // v0.6.2 回归：status 工具是白名单构造返回值，新增的索引陈旧度字段必须显式映射，
+    // 否则 store.status() 加了字段但工具输出看不到（曾真实发生）。
+    assert.ok('indexDocCount' in st, 'indexDocCount 必须出现在 devmemory_status 输出')
+    assert.ok('indexStale' in st, 'indexStale 必须出现在 devmemory_status 输出')
+    assert.equal(typeof st.indexStale, 'boolean')
+    assert.equal(st.indexStale, false, '空库无快照，不应判为陈旧')
+    assert.equal(st.indexDocCount, null, '空库尚无快照，应为 null')
+
     // devmemory_diag：summary 动作
     const summary = await diagTool.execute({})
     assert.equal(summary.total, 1)

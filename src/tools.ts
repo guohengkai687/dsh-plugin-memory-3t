@@ -141,7 +141,7 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
     {
       name: 'devmemory_status',
       description:
-        '检查三层记忆库状态：L1 流水 / L2 笔记 / L3 事实的条目数、库根、最近一次 digest、索引脏写计数、git 版本回溯状态、向量检索状态、诊断记录计数（v0.4）。诊断或自检用。',
+        '检查三层记忆库状态：L1 流水 / L2 笔记 / L3 事实的条目数、库根、最近一次 digest、索引脏写计数与快照陈旧度（indexDocCount/indexStale）、git 版本回溯状态、向量检索状态、诊断记录计数（v0.4）。诊断或自检用。',
       parameters: { type: 'object', properties: {} },
       output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
       async execute() {
@@ -158,6 +158,9 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
           digestRetries: digest.retries,
           digestLastError: digest.lastError,
           indexDirty: status.indexDirty,
+          // v0.6.2：索引快照陈旧度（此工具为白名单构造，漏映射会让 store 新增字段不可见）
+          indexDocCount: status.indexDocCount,
+          indexStale: status.indexStale,
           firstRun: status.firstRun,
           vcs: status.vcs,
           embedding: status.embedding,

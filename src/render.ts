@@ -37,6 +37,9 @@ export interface StoreStatus {
   counts: { l1: number; l2: number; l3: number }
   lastDigestAt: string | null
   indexDirty: number
+  /** v0.6.2：索引快照文档数与陈旧标记（可选：旧形态缺省）。 */
+  indexDocCount?: number | null
+  indexStale?: boolean
   firstRun: boolean
   /** git 版本回溯状态（v0.2）。 */
   vcs: {
@@ -95,6 +98,10 @@ export function renderBootBlock(status: StoreStatus, budget: number): string {
     // v0.4：存在诊断记录（异常/不符合预期）时提示可用 devmemory_diag 查看，便于定期审查优化插件
     status.diag !== undefined && status.diag.total > 0
       ? `- 诊断：累计记录 ${status.diag.total} 条异常/不符合预期（其中 error ${status.diag.error} 条）。用 devmemory_diag 查看汇总。`
+      : '',
+    // v0.6.2：索引快照与库内文档数不一致（陈旧/超前）时显式告警，避免"recall 恒为空"再次静默发生
+    status.indexStale === true
+      ? `- ⚠ 索引快照与库内不一致（快照 ${status.indexDocCount ?? 0} 篇 vs 库内 ${status.counts.l1 + status.counts.l2 + status.counts.l3} 篇）：下次查询会自动重建，也可用 devmemory_status 核对。`
       : '',
   ]
   return clampTokens(lines.filter((line) => line !== '').join('\n'), budget)
