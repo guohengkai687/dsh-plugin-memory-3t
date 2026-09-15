@@ -41,7 +41,7 @@
   - link：共享 tag 双向（至多 4 对）
   - compact：L1 当日 >80 行 → 保留会话标题行 + 前 1/2 事件行压缩为摘要 + digest 摘要段
   - 全程 try/catch：任一异常 → meta.digest {pending,retries,lastError}，**绝不 rethrow**
-  - 补做：`runPending(store)` 在 session-start 调用（retries<maxRetries）
+  - 补做：`runPending(store)` 在 agent/created 调用（retries<maxRetries）
 - 完成标志：`test/digest.test.mjs`：造流水 → run → 断言 L3 新增/去重/上限/compact；异常注入（mock store 某方法 throw）→ 断言不抛且 meta.digest.pending=true。
 
 ## T7 render.ts（AC7 预算钳制）
@@ -58,9 +58,9 @@
 - `apply(ctx, config)`：
   - 解析 workdir：DSH context 提供（`ctx` 上工作区/agent 信息——**实现时在 DSH 源码确认 ctx 提供 workspace 根的方式**；找不到则回退 process.cwd()，README 说明）。**注意**：若 DSH 无可靠 workspace 根 API，storageDir 解析退化为 `process.cwd()`（会话工作目录），记录 ADR。
   - `store.init()`（异步，fail-open：catch → logger.warn + 继续注册）；store 实例存 closure。
-  - `ctx.skills.register(loadMemorySkill())`；`ctx.systemPrompt.context(boot)`（函数式 text 读 WeakMap agent 视图）；事件接线 session-start/pre-step/**turn-stopping**/created；`ctx.tools.register(...tools)` ×7。
+  - `ctx.skills.register(loadMemorySkill())`；`ctx.systemPrompt.context(boot)`（函数式 text 读 WeakMap agent 视图）；事件接线 **agent/created**（DSH 真实会话边，无 session-start）/pre-step/**turn-stopping**；`ctx.tools.register(...tools)` ×7。
   - pre-step：先读 agent-loop `lib/index.js` waterfall 实现，消息不可变则 v0.1 跳过注入（仅 boot 引导），在代码注释与 README 记录。
-- 完成标志：`test/lifecycle.test.mjs`（ctx stub：断言 skills.register 调用 1 次、systemPrompt.context 1 次、tools.register 7 次、on 事件 4 类、store.init 异常不抛）；`tsc --noEmit` 通过。
+- 完成标志：`test/lifecycle.test.mjs`（ctx stub：断言 skills.register 调用 1 次、systemPrompt.context 1 次、tools.register 11 次、on 事件 3 类不含 session-start、store.init 异常不抛）；`tsc --noEmit` 通过。
 
 ## T10 包级验证 + 测试全套（AC1/AC8 证据）
 - `npm run build && npm run typecheck && node --test --test-isolation=none dist-test/`；修正至全绿。

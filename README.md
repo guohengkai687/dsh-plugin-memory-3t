@@ -192,13 +192,18 @@ http://127.0.0.1:<gui端口>/dev-memory/api/diag     # 诊断汇总 JSON（v0.4�
 
 ```
 workspace 根 = config.workspaceDir（非空，显式固定）
-            ?: 会话 header.cwd（session-start 绑定）
+            ?: 会话 header.cwd（agent/created 边绑定；pre-step / turn-stopping 按 payload.agent 复绑）
             ?: process.cwd()（headless / 无会话信息回退）
 ```
 
 - 不同工作区的会话自动落到各自的 `<工作区>/.memory`（每工作区一库）；库根随会话切换，工具/WebUI 面板按请求时的工作区动态解析。
 - headless（无会话或会话无 header.cwd）保持旧行为（进程 cwd 基准），完全向后兼容。
 - 需要把库钉死在某个目录（如多工作区共存同一库）用 `workspaceDir` 绝对路径。
+
+> **v0.6.4 修复（库根跑偏根因）**：v0.6.3 及以前误监听**不存在的** `agent/session-start` 事件（DSH 权威事件目录只有 `agent/created` / `agent/pre-step` / `agent/turn-stopping` 等，均注入 `agent`），导致"按会话工作区解析"从未真正执行——库根被钉在插件 apply 时的进程 cwd（web 服务 cwd 非工作区时，记忆全部写入"跑偏"的空库）。v0.6.4 改为：
+> 1. 会话启动边改用真实的 `agent/created`（source=startup/resume/clear/compact）：绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；
+> 2. `agent/pre-step` / `agent/turn-stopping` 按 `payload.agent` 的会话 cwd 复绑库根（多工作区并存、插件热重载后首个步骤也不串库）；
+> 3. `workspace` 自动解析不再在 apply 期按进程 cwd 急切建库（`workspaceDir` 钉死 / `scope:user` 仍立即绑定）。
 
 ## 诊断与异常记录（v0.4）
 
@@ -291,6 +296,7 @@ npm test              # build + node --test（Windows 沙箱下用 --test-isolat
 - ✅ v0.5.4 完成：独立页纯参数面——移除页面顶部「记忆库状态」卡（状态行与表单开关主题重合造成"参数重复"观感），库状态回归只读面板 `/dev-memory/`；设置页只剩打开面板入口 + 参数表单，client bundle 再缩至 19.6kB
 - ✅ v0.5.5 完成（参数重复真正根因）：`form.tsx` 渲染循环把分组标题条目与组内首个字段一起 push，导致每个分组的第一个参数渲染两次（v0.5.0 引入，前述"状态卡/卡片"皆为表面现象）；修复为标题条目只含 header、字段行单独渲染，每个参数只出现一次
 - ✅ v0.6.0 完成（插件更名）：`dsh-dev-memory-3t` → **`dsh-plugin-memory-3t`**——目录与 git 仓库、package.json 包名、插件注册名（`src/index.ts` `name`）、设置 `settings.section` 插槽 id（`PLUGIN_ID`）、client bundle 标识、`cordis.patch.yml` id/name、安装命令与全部文档（README/DESIGN/team）同步更名；测试断言同步（`source.plugin`）；版本升至 0.6.0 打包归档 `.memtest-pack` 并重装 headless/web 两 profile（旧归档 `dsh-dev-memory-3t-0.*.tgz` 保留为历史产物）
+- ✅ v0.6.4 完成（库根跑偏根因修复）：误监听不存在的 `agent/session-start` 事件 → 会话工作区绑定/视图装载/digest 补做全部死代码，库根被钉在插件 apply 时的进程 cwd（web 服务 cwd 非工作区即"跑偏"）。改为接真实 `agent/created` 边（startup/resume/clear/compact，payload 注入 `agent`）绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；`pre-step`/`turn-stopping` 按 `payload.agent` 会话 cwd 复绑（多工作区不串库）；workspace 自动解析不再在 apply 期按进程 cwd 急切建库。回归：事件清单不含 session-start、多工作区交错 pre-step 落各自库根（见「工作区根解析」节）
 - v0.6（候选）：多库并存切换（named libraries）、recall 结果缓存与面板历史、scope 迁移工具（workspace→user 搬家）
 
 ## License

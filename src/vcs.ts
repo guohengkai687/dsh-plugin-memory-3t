@@ -7,7 +7,7 @@
  *   maintainGitignore 已把 .memory 从宿主忽略，二者天然衔接）；`vcs.gitDir`
  *   可把元数据目录分离出去（--separate-git-dir，绝对/相对记忆库根路径）。
  * - 提交策略：写操作 `record()` → 防抖（debounceMs）+ 写入计数（batch）触发合并提交；
- *   边界事件（digest / turn-stopping / session-start / consolidate / restore）显式 `flush()`。
+ *   边界事件（digest / turn-stopping / agent/created / consolidate / restore）显式 `flush()`。
  * - 恢复语义：`git restore --source=<ref>` 只改工作区、绝不重写历史；恢复前自动
  *   checkpoint（把未提交变更落一个提交），恢复本身也是新提交（可撤销的撤销）。
  * - 派生物 index.json 由库内 .gitignore 忽略，不进版本历史（可重建的缓存）。
@@ -386,7 +386,7 @@ export class GitVcs {
     }
   }
 
-  /** 显式提交边界（digest / turn-stopping / session-start / consolidate）。 */
+  /** 显式提交边界（digest / turn-stopping / agent/created / consolidate）。 */
   async flush(reason?: string): Promise<{ hash: string; message: string } | null> {
     if (this.timer !== null) {
       clearTimeout(this.timer)

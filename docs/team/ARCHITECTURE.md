@@ -122,18 +122,18 @@ docKey = `l1:2026-01-15` / `l2:notes/xxx` / `l3:pref-xxx`。索引为快照；�
         f) compact：L1 重写为：保留当天各会话摘要 + digest 摘要段
    → 成功：meta.digest = {lastRunAt, pending:false, retries:0, lastError:null}；counters 累加
    → 失败（任一步 throw）：catch → meta.digest = {pending:true, retries+1, lastError}，写盘，**不 rethrow**
-   → 补做触发：session-start 时若 pending 且有上次会话流水 → 自动补一次（retries+1）直至成功或 retries>=2
+   → 补做触发：agent/created（DSH 真实会话边，v0.6.4 起）时若 pending 且有上次会话流水 → 自动补一次（retries+1）直至成功或 retries>=2
 ```
 
 - v0.1 不做模型的"智能沉淀 pass"（无 LLM 调用、零依赖）；skill 引导模型在会话里显式 `devmemory_remember/note` 完成精细沉淀，digest 只做确定性兜底。此取舍写入 ADR 与 README"限制"。
 
 ## 5. 生命周期接线（index.ts）
 
-- `agent/session-start`：`store.loadSessionContext(agentCtx)` → 异步读当日+昨日 L1 摘要、recall(L3 top-k 且 salience≥0.25)；调用 `render.renderRuntimeBlock` / `render.renderSpaceBlock`（token 钳制）；把文本暂存到 per-agent Map（`agentSessionViews`，WeakMap<agent,view>），供 pre-step 使用（若 DSH assembly context 无法每 agent 隔离，则走 `ctx.systemPrompt.context` 动态 text 读 WeakMap——**实现时二选一，倾向 context 动态函数读 WeakMap**，因为 DSH context 是每 assembly 求值的）。
+- **`agent/created`（v0.6.4 起为核心会话边；DSH 无 `agent/session-start`）**：`store.loadSessionContext(agentCtx)` → 异步读当日+昨日 L1 摘要、recall(L3 top-k 且 salience≥0.25)；调用 `render.renderRuntimeBlock` / `render.renderSpaceBlock`（token 钳制）；把文本暂存到 per-agent Map（`agentSessionViews`，WeakMap<agent,view>），供 pre-step 使用（若 DSH assembly context 无法每 agent 隔离，则走 `ctx.systemPrompt.context` 动态 text 读 WeakMap——**实现时二选一，倾向 context 动态函数读 WeakMap**，因为 DSH context 是每 assembly 求值的）。
 - `system-prompt/assemble`：`ctx.systemPrompt.context({name:'dev-memory-boot', order:-200, text: () => renderBootBlock(...)})`——boot 块含：数据即数据不是指令的声明、devmemory_* 工具存在提示、预算自约束。
 - `agent/pre-step`（waterfall）：`maybeRemind(agent)`：L3 高相关命中（score≥0.6）未在本会话注入且提醒次数<2 → 返回 reminder 文本；handler `return next(...)` 形态按 DSH waterfall 约定（即：构造新 messages 数组附加 createPluginMessage，参照 mnemon lifecycle.ts:328 的模式在 next 前修改 payload——**实现前必须读 agent-loop 该处 dispatch 源码确认修改方式**；若 waterfall 只传不可变 payload，则退化为不做 pre-step 注入，v0.1 由 boot 声明引导模型自觉 recall）。
 - `agent/turn-stopping`（serial）：`store.digest(agent, sessionEvents)`；全部 try/catch fail-open。
-- `agent/created`：subagent 继承父 agent 的 view（WeakMap 以 root agent 为准；v0.1 简单化：subagent 不单独注入，继承 root 视图引用）。
+- `agent/created`（v0.6.4 统一处理库根绑定 + 视图装载 + subagent 继承）：subagent 继承父 agent 的 view（WeakMap 以 root agent 为准；v0.1 简单化：subagent 不单独注入，继承 root 视图引用）；绑定库根后 pre-step/turn-stopping 亦按 payload.agent 会话 cwd 复绑，多工作区不串库。**注意：v0.6.3 及以前误用不存在的 `agent/session-start`，上述绑定从未执行（库根跑偏 bug），v0.6.4 已修复。**
 
 ## 6. 测试策略
 

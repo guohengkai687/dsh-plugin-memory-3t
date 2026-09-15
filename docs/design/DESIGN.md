@@ -38,7 +38,7 @@
 
 | 层 | 名称 | 内容 | 生命周期 | 注入方式 | 预算（tokens） |
 |---|---|---|---|---|---|
-| **L1** | Runtime 工作记忆 | 当日会话流水（`runtime/YYYY-MM-DD.md`），记录"今天做了什么/讨论了什么"的紧凑摘要 | 每会话启动注入近期回放；连续会话间靠它衔接 | `agent/session-start` 后、首次 pre-step 前随 runtime context 注入 | ≤ 1200 |
+| **L1** | Runtime 工作记忆 | 当日会话流水（`runtime/YYYY-MM-DD.md`），记录"今天做了什么/讨论了什么"的紧凑摘要 | 每会话启动注入近期回放；连续会话间靠它衔接 | `agent/created`（DSH 真实"会话启动/恢复"边）装载、首次 pre-step 前随 runtime context 注入 | ≤ 1200 |
 | **L2** | Documents 文献记忆 | 完整知识笔记（教程、决策背景、项目档案），类似 Hindsight 的知识页 | 由 digest 或显式 `devmemory_note` 沉淀；**按需检索，不注入** | `devmemory_recall` / `devmemory_note` 工具 | 0（不主动进 prompt） |
 | **L3** | Memory Spaces 长期事实 | 原子化事实条目：偏好 / 决策 / 实体 / 项目上下文，带 salience 衰减 | 由 digest 提升或显式 `devmemory_remember` 写入 | 会话启动注入 top-k 高相关命中；pre-step 按需补注 | ≤ 800 |
 
@@ -108,7 +108,7 @@ L1 流水格式：
 
 | 钩子 | 动作 | 预算 |
 |---|---|---|
-| `agent/session-start` | 装载 L1 近期回放（最近 2 日流水摘要）+ L3 top-k；**异步预计算**，不阻塞首步 | 合计 ≤ 2000 |
+| `agent/created` | **v0.6.4 起为核心会话边**（source=startup/resume/clear/compact，payload 注入 `agent`）：按 `agent.session.header.cwd` 绑定记忆库根 + 装载 L1 近期回放（最近 2 日流水摘要）+ L3 top-k + 补做未完成 digest + 补交未提交写入；subagent（带 `parentSession`）继承父会话视图（reminded 计数独立）。**注意：DSH 无 `agent/session-start` 事件**（v0.6.3 及以前误监听之，会话绑定从未执行 → 库根跑偏到进程 cwd，v0.6.4 修复） | 合计 ≤ 2000 |
 | `system-prompt/assemble` | 通过 `ctx.systemPrompt.context({name:'dev-memory-boot', order:-200})` 注入：技能提示开关、库状态、约定摘要（"查记忆用 `devmemory_recall`，不要臆造"） | ≤ 600 |
 | `agent/pre-step` | 仅当 (a) 本会话命中高相关 L3 且未注入过这些条目 (b) 提醒额度未耗尽（每会话 ≤ 2 次）→ `createPluginMessage(reminder, 'instructions')` 提示"可考虑查记忆"；**只提醒不代查** | ≤ 400/次 |
 | `agent/turn-stopping` | **digest**：见 §4.2 | — |
@@ -301,6 +301,7 @@ L1 流水格式：
 | **v0.5.3** | ✅ 设置面去重：撤销 `settings.plugin.item` 卡片槽位（与 `settings.section` 独立页功能重复、参数两处可见，用户验收要求保留独立页、删除卡片）；参数唯一编辑面 = 独立页（打开面板 + 完整表单），独立页内参数不重复（单份 SECTION_FIELDS）；删除 `client/card.tsx` 与 card 专用 locale，client bundle 29.7kB→25.1kB | 134/134 全绿 0 跳过 + client typecheck + tsdown 构建；打包重装 headless/web 两 profile（0.5.3）归档 `.memtest-pack`；GUI 核对：插件配置无卡片 |
 | **v0.5.4** | ✅ 独立页纯参数面：移除页面顶部「记忆库状态」卡（v0.5 起随设置页引入，其状态行——版本回溯/检索/诊断记录——与下方表单开关主题重合，用户反馈"参数重复"）；删 status fetch、`PanelStatus` 与 status*/state* locale 键，库状态回归只读面板 `/dev-memory/` 查看；设置页 = 打开面板入口 + 参数表单；client bundle 25.1kB→19.6kB | 134/134 全绿 0 跳过 + client typecheck + tsdown 构建；打包重装 headless/web 两 profile（0.5.4）归档 `.memtest-pack`；GUI 核对：设置→记忆管理 无状态卡 |
 | **v0.5.5** | ✅ 表单组首字段重复渲染修复（参数重复**真正根因**）：按用户截图逐行转录定位——每个**分组的第一个参数**出现两次（启用面板/启用诊断记录/启用主动追忆/启用 git 回溯 ×2，同组第二字段如事件保留上限仅 ×1），导航/链接/提示均单份；根因 = `form.tsx` 渲染循环 `rendered.push({ header: groupLabel(field.group), field })` 把组内首个字段**连同标题推入标题条目**、随后 `rendered.push({ field })` 再推一次（v0.5.0 引入，v0.5.3 卡片/v0.5.4 状态卡均为表面现象）；修复：标题条目只携带 header（`{ header }`），渲染处 `field !== undefined` 才输出字段行，rowKey/header key 区分；client bundle 19.6kB | 134/134 全绿 0 跳过 + 双端 typecheck + tsdown 构建；打包重装 headless/web 两 profile（0.5.5）归档 `.memtest-pack`；GUI 核对：每个参数单份、分组标题单份 |
+| **v0.6.4** | ✅ 库根跑偏根因修复：误监听**不存在的** `agent/session-start`（DSH 权威目录只有 agent/created / pre-step / turn-stopping，均从 payload 注入 agent）→ 会话工作区绑定/视图装载/digest 补做/补交全部死代码，库根在 apply 期按进程 cwd 钉死（web 服务 cwd 非工作区 → 记忆落入"跑偏"空库，真实故障：FlexOne014_master 会话记忆落到 `/home/kiki/deepseek-harness/.memory`）。修复：①启动边接真实 `agent/created`（source=startup/resume/clear/compact）——绑定库根 + 根会话装载 L1/L3 视图 + subagent 继承（原独立 created 块并入）+ digest 补做 + 未提交写入补交，全 try/catch fail-open（created 为 serial，抛错会回滚 attach）；②`agent/pre-step`/`agent/turn-stopping` 按 `payload.agent` 会话 cwd 复绑（多工作区并存/热重载不串库）；③workspace 自动解析不再在 apply 期按进程 cwd 急切建库（`workspaceDir` 钉死与 `scope:user` 仍立即绑定） | 全量回归（lifecycle 事件断言改 3 类 + 新增"pre-step/turn-stopping 按 payload.agent 绑定不串库"用例 + init 失败用例改走 agent/created 触发；事件清单回归断言不含 session-start）；typecheck + 全量测试全绿 |
 | **v0.6.0** | ✅ 插件更名：`dsh-dev-memory-3t` → **`dsh-plugin-memory-3t`**——目录与 git 仓库、package.json 包名、插件注册名（`src/index.ts` `name`）、`settings.section` 插槽 id（`PLUGIN_ID`）、client bundle 厂商标识、`cordis.patch.yml` id/name、安装命令（README）与全部文档（DESIGN/team 交接物）全量同步；`test/lifecycle.test.mjs` 的 `source.plugin` 断言同步；tsdown.config.ts 的 PLUGIN_ID 同步。版本升至 0.6.0，旧归档 `dsh-dev-memory-3t-0.*.tgz` 保留为历史产物 | 全量回归（134/134 全绿 0 跳过 + 双端 typecheck + tsdown 构建/重打包）；重新打包 `dsh-plugin-memory-3t-0.6.0.tgz` 归档 `.memtest-pack`；重装 headless/web 两 profile（依赖串改新 tgz + 删旧 node_modules 副本后 pnpm install）；验证安装副本 name=0.6.0/注册名/client bundle 无旧 token；GUI 重启后核对：设置插槽仍以「记忆管理」显示、参数单份 |
 
 **不做的（明确）**：多 provider、云同步、主动追忆聊天（除非用户开）、数据库后端。
@@ -336,8 +337,8 @@ export function apply(ctx: Context, config: Config) {
     text: () => store.renderBootBlock(config),   // ≤ maxBootTokens
   })
 
-  // 3) 会话启动装载 L1 + L3
-  ctx.on('agent/session-start', async ({ agent }) => {
+  // 3) 会话启动装载 L1 + L3（v0.6.4：DSH 无 agent/session-start，统一走 agent/created）
+  ctx.on('agent/created', async ({ agent }) => {
     const ctx = await store.loadSessionContext(agent)   // 异步，不阻塞首步
     agent.ctx.effect(() => { /* 挂到 agent 作用域，随 agent 销毁 */ })
   })
@@ -375,7 +376,7 @@ dsh-plugin-memory-3t/
 ├── package.json            # name: dsh-plugin-memory-3t, MIT, 零 runtime deps, peers: @deepseek-ai/cordis 等
 ├── cordis.patch.yml        # 按 DSH 约定 bundle patch（- insert 插件条目）
 ├── src/
-│   ├── index.ts            # 入口（生命周期接线：session-start/pre-step/turn-stopping/created + 设置桥接线）
+│   ├── index.ts            # 入口（生命周期接线：agent/created（库根绑定+视图+继承）/pre-step/turn-stopping + 设置桥接线）
 │   ├── store.ts            # 三层读写 + 权限 + 审计（scope: workspace|user 库根）
 │   ├── indexer.ts          # BM25 索引 惰性重建/查询
 │   ├── embed.ts            # Ollama embedding（可选，fail-open 降级）

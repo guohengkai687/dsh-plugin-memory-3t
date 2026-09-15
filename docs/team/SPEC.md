@@ -35,7 +35,7 @@ DSH 本地三层记忆插件：插件管机制（存储/注入/检索/安全）�
 - 证据：代码审查 + 可选激活验证（QA 尽力而为）。
 
 **AC7 生命周期**：
-- `agent/session-start` → 装载 L1 近期回放（≤ maxRuntimeTokens）+ L3 top-k（≤ maxSpaceTokens），异步不阻塞；
+- **`agent/created`**（v0.6.4 起；DSH 无 `agent/session-start`）→ 按会话真实工作区绑定库根 + 装载 L1 近期回放（≤ maxRuntimeTokens）+ L3 top-k（≤ maxSpaceTokens），异步不阻塞；
 - `system-prompt/assemble` → `ctx.systemPrompt.context({name:'dev-memory-boot', order:-200})` ≤ maxBootTokens；
 - `agent/pre-step` → 高相关 L3 命中未注入且额度未耗尽（每会话 ≤2 次）时注入 `createPluginMessage(reminder,'instructions')`，否则不注入；
 - `agent/turn-stopping` → digest（extract/dedupe/promote/link/compact）。

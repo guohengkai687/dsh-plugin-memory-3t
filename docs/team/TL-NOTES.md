@@ -53,10 +53,10 @@ pre-step handler 修改决策（`lifecycle.ts` line ~328）：`return { kind: 'e
 
 ## 3. 生命周期事件 payload（参考 mnemon contracts + agent-loop）
 
-- `agent/session-start`：`{ agent, source: 'startup'|'resume'|'clear'|'compact' }`
+- ~~`agent/session-start`~~（**v0.6.4 勘误：DSH 无此事件**，勿再使用）——会话边实为 `agent/created`：`{ agent, source: 'startup'|'resume'|'clear'|'compact', signal? }`
 - `agent/pre-step`（waterfall）：`{ agent, messages: HostUserMessage[], turn, step, signal }`（mnemon 接口定义；DSH agent-loop `lib/index.js` line 501 处 waterfall dispatch）
 - `agent/turn-stopping`（serial）：`{ agent, turn, signal }`
-- `agent/created`：`{ agent }`（mnemon `AgentEventPayload`）
+- `agent/created`：`{ agent, source, signal? }`（DSH agent runtime-types；source 同上）
 - `agent.followup(input)`：agent-loop line 396 存在
 
 ## 4. Skill 注册（dsh-skill）
@@ -186,7 +186,7 @@ ctx.systemPrompt.context({
   内部插件（dsh-client-hmr / dsh-client-connection）就是这么注册的；DSH 无公开"插件 UI"框架，
   本地 HTTP 路由就是官方路径（`webserver/index-inject` 只是 index.html 注入行，不适合做页面）。
 - **探测**：`ctx.get('webServer')` 优先、`ctx.webServer` 属性兜底，两路 try/catch——headless 无该
-  服务时静默跳过；有竞态（webServer 晚于插件 apply 就绪）→ 首个 `agent/session-start` 补注册一次。
+  服务时静默跳过；有竞态（webServer 晚于插件 apply 就绪）→ 首个 `agent/created` 补注册一次。
 - **只读语义**：无任何写端点；检索走 `store.recall(..., {touch:false})` —— 页面检索不提升 L3
   accesses/salience、不产生 git 待提交（实测断言 pendingWrites===0）。
 - 页面自包含（内联 CSS + 原生 JS，零外部请求）；API `/api/status` + `/api/search`（q 必填 /
@@ -207,11 +207,10 @@ ctx.systemPrompt.context({
 
 ### 10.3 subagent 视图继承（`src/index.ts`）
 
-- 维护 `viewBySession: Map<sessionId, AgentView>`（session-start 装载后登记）；
-  `agent/created` 时取 `agent.session.header.parentSession`，命中则把父视图复制给子 agent
+- 维护 `viewBySession: Map<sessionId, AgentView>`（v0.6.4 起在 `agent/created` 装载/继承后登记）；
+  `agent/created` 取 `agent.session.header.parentSession`，命中则把父视图复制给子 agent（v0.6.4 起库根绑定/视图装载/subagent 继承统一在 agent/created 处理）
   （`reminded` 独立计数归零）。根会话（无 parent）登记为追忆候选。
-- 细节：子 agent 自己的 session-start 会重新装载（内容与父一致，天然覆盖继承值）；继承的价值在
-  created → session-start 之间的 boot 装配（避免子 agent boot 无 L1/L3 注入）。
+- 细节（v0.6.4 勘误）：DSH 无 `agent/session-start`，子 agent 的 `agent/created` 直接继承父视图（父视图已由父的 agent/created 装载完成）；继承的价值在避免子 agent boot 无 L1/L3 注入。
 
 ### 10.4 restore 整库时间片（`src/vcs.ts` / `src/tools.ts`）
 

@@ -67,10 +67,12 @@ test('lifecycle: apply 注册 skill/boot/工具/事件', async () => {
     // 工具 11 个
     assert.equal(calls.tools.length, 11)
 
-    // 事件 4 类
-    for (const event of ['agent/session-start', 'agent/pre-step', 'agent/turn-stopping', 'agent/created']) {
+    // 事件 3 类（v0.6.4：不再监听不存在的 agent/session-start，统一走真实的 agent/created）
+    for (const event of ['agent/created', 'agent/pre-step', 'agent/turn-stopping']) {
       assert.ok(calls.on.has(event), `缺少事件 ${event}`)
     }
+    // 回归：DSH 无 agent/session-start 事件（曾导致库根绑定/视图装载死代码、库根跑偏到进程 cwd）
+    assert.ok(!calls.on.has('agent/session-start'), '不得注册不存在的 agent/session-start')
   } finally {
     process.chdir(cwd)
     await settle()
@@ -86,10 +88,10 @@ test('lifecycle: pre-step 记录消息并注入提醒（预算内）', async () 
     const { ctx, calls } = makeStubContext()
     apply(ctx, { storageDir: '.memory', recall: { highScore: 0.6 }, vcs: { enabled: false } })
     const preStep = calls.on.get('agent/pre-step')
-    const sessionStart = calls.on.get('agent/session-start')
+    const created = calls.on.get('agent/created')
 
     const agent = { id: 'a1' }
-    await sessionStart({ agent, source: 'startup' })
+    await created({ agent, source: 'startup' })
 
     // 第一次：包含回忆触发词 → 注入
     const next = async () => ({ kind: 'enter', messages: [{ id: 'x', role: 'user', content: [{ type: 'text', text: '原始消息' }] }] })
@@ -135,6 +137,8 @@ test('lifecycle: init 失败仍完成注册（fail-open）', async () => {
     apply(ctx, { storageDir: broken, vcs: { enabled: false } })
     assert.equal(calls.skills.length, 1)
     assert.equal(calls.tools.length, 11)
+    // v0.6.4：workspace 自动解析不再在 apply 期急切建库 → 首个会话边（agent/created）才触达坏库根
+    await calls.on.get('agent/created')({ agent: { id: 'i1' }, source: 'startup' })
     // 等异步 init 失败完成
     await new Promise((r) => setTimeout(r, 100))
   } finally {
@@ -155,13 +159,13 @@ test('lifecycle: workspace 根跟随会话 header.cwd（v0.3.1），工具用 ge
 
     // 无 header.cwd 的 agent：库根 = 进程 cwd（旧行为回退）
     const agentA = { id: 'a1' }
-    await calls.on.get('agent/session-start')({ agent: agentA, source: 'startup' })
+    await calls.on.get('agent/created')({ agent: agentA, source: 'startup' })
     const bootA = calls.contexts[0].text({ agent: agentA })
     assert.ok(bootA.includes(join(ws, '.memory')), '无 cwd 的会话应回退进程 cwd: ' + bootA)
 
     // 带 session.header.cwd 的 agent：库根切换到会话真实工作区
     const agentB = { id: 'b1', session: { header: { cwd: ws2 } } }
-    await calls.on.get('agent/session-start')({ agent: agentB, source: 'startup' })
+    await calls.on.get('agent/created')({ agent: agentB, source: 'startup' })
     const bootB = calls.contexts[0].text({ agent: agentB })
     assert.ok(bootB.includes(join(ws2, '.memory')), 'boot 库根应指向会话工作区: ' + bootB)
 
@@ -178,6 +182,54 @@ test('lifecycle: workspace 根跟随会话 header.cwd（v0.3.1），工具用 ge
     process.chdir(cwd)
     await settle()
     await rm(ws, { recursive: true, force: true })
+    await rm(ws2, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle: pre-step/turn-stopping 按 payload.agent 工作区绑定（v0.6.4 回归：不得串库）', async () => {
+  const ws1 = await mkdtemp(join(tmpdir(), 'dm3t-ws1-'))
+  const ws2 = await mkdtemp(join(tmpdir(), 'dm3t-ws2-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws1)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const turnStopping = calls.on.get('agent/turn-stopping')
+    const statusTool = calls.tools.find((t) => t.name === 'devmemory_status')
+    assert.ok(created && preStep && turnStopping && statusTool)
+
+    const agent1 = { id: 'w1', session: { header: { cwd: ws1 } } }
+    const agent2 = { id: 'w2', session: { header: { cwd: ws2 } } }
+    await created({ agent: agent1, source: 'startup' })
+    await created({ agent: agent2, source: 'startup' })
+
+    const next = async () => ({ kind: 'enter', messages: [] })
+
+    // agent2 与 agent1 交错：agent2 的 pre-step 必须写进 ws2 库，而不是"最近 created 的 ws2/上次 active"
+    await preStep({ agent: agent2, messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: '第二个工作区的消息' }] }], turn: 1, step: 1, signal: undefined }, next)
+    await settle()
+    let s = await statusTool.execute({})
+    assert.equal(s.root, join(ws2, '.memory'), 'pre-step 应按 payload.agent 绑定 ws2: ' + s.root)
+    assert.ok(s.counts.l1 >= 1, 'ws2 库应有 L1 流水，而非串到 ws1')
+
+    // turn-stopping 同样按 payload.agent 绑定
+    await turnStopping({ agent: agent2, turn: 1, signal: undefined })
+    s = await statusTool.execute({})
+    assert.equal(s.root, join(ws2, '.memory'), 'turn-stopping 应按 payload.agent 绑定 ws2: ' + s.root)
+
+    // 关键回归点：agent1 的 pre-step 必须切回 ws1（修复前 ensureStore() 无参沿用 active → 串到 ws2）
+    await preStep({ agent: agent1, messages: [{ id: 'm2', role: 'user', content: [{ type: 'text', text: '第一个工作区的消息' }] }], turn: 1, step: 1, signal: undefined }, next)
+    await settle()
+    s = await statusTool.execute({})
+    assert.equal(s.root, join(ws1, '.memory'), 'pre-step 应按 payload.agent 绑定 ws1（修复前会串到 ws2）: ' + s.root)
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws1, { recursive: true, force: true })
     await rm(ws2, { recursive: true, force: true })
   }
 })
@@ -212,21 +264,20 @@ test('lifecycle: subagent 继承父会话视图（L1 回放 / L3 top-k）', asyn
       ].join('\n'),
     )
 
-    const sessionStart = calls.on.get('agent/session-start')
     const created = calls.on.get('agent/created')
     const parent = { id: 'p1' }
-    await sessionStart({ agent: parent, source: 'startup' })
+    await created({ agent: parent, source: 'startup' })
 
     // subagent 带 parentSession 创建 → 继承父会话视图
     const sub = { id: 's1', session: { header: { parentSession: 'p1' } } }
-    created({ agent: sub })
+    await created({ agent: sub, source: 'resume' })
 
     const bootText = calls.contexts[0].text({ agent: sub })
     assert.ok(bootText.includes('种子上下文'), 'subagent boot 应继承父会话的 L3 视图: ' + bootText)
 
     // 无 parent 的 agent 不受影响
     const root2 = { id: 'r2' }
-    created({ agent: root2 })
+    await created({ agent: root2, source: 'startup' })
     assert.doesNotThrow(() => calls.contexts[0].text({ agent: root2 }))
   } finally {
     process.chdir(cwd)
@@ -246,7 +297,7 @@ test('lifecycle: 库根 A→B→A 切换后复用已初始化的库（v0.6.3 回
     // 本用例的观测点就是 vcs 是否被 init，所以必须开启 vcs（其余 lifecycle 用例都关着）
     apply(ctx, { storageDir: '.memory', vcs: { debounceMs: 50 } })
 
-    const sessionStart = calls.on.get('agent/session-start')
+    const sessionStart = calls.on.get('agent/created')
     const statusTool = calls.tools.find((t) => t.name === 'devmemory_status')
     const agentAt = (dir) => ({ id: 'a:' + dir, session: { header: { cwd: dir } } })
     const statusFor = async (dir) => {

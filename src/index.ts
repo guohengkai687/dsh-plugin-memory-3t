@@ -1,10 +1,13 @@
 /**
  * dsh-plugin-memory-3t 插件入口：机制层接线。
  *
- * - 生命周期：session-start 装载视图 / pre-step 记录消息 + 引导提醒 /
- *   turn-stopping digest 沉淀 / created（subagent 继承，v0.1 简化为共享视图）
- * - 工作区根（v0.3.1）：按会话真实工作区 agent.session.header.cwd 解析，不再假设进程 cwd；
+ * - 生命周期：agent/created（DSH 真实"会话启动/恢复"边）绑定库根 + 装载视图 /
+ *   pre-step 记录消息 + 引导提醒 / turn-stopping digest 沉淀 /
+ *   created 兼 subagent 视图继承（v0.1 简化为共享视图）
+ * - 工作区根（v0.3.1/v0.6.4）：按会话真实工作区 agent.session.header.cwd 解析，不再假设进程 cwd；
  *   回退链 workspaceDir 固定 > 会话工作区根 > process.cwd()（headless/旧形态）
+ *   （v0.6.4 修复：此前误监听不存在的 agent/session-start 事件，会话语义的事件从未发射，
+ *   库根绑定/视图装载从未执行 → 库根被钉在 apply 时的进程 cwd，落到"跑偏"空库。）
  * - system-prompt：dev-memory-boot context（order -200，函数式读取 per-agent 视图）
  * - skills：内嵌 dev-memory 协议
  * - tools：11 个 devmemory_* 工具（含 v0.4 新增 devmemory_diag 诊断汇总）
@@ -153,6 +156,11 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
    * - 已建库 → 沿用当前库（工具/边界回调在会话内执行，会话启动已绑定正确工作区；
    *   绝不用进程 cwd 把库"切回去"）；
    * - 未建库 → 回退 process.cwd()（headless / CLI 形态与旧行为一致）。
+   *
+   * v0.6.4：所有**带会话上下文**的路径（agent/created / pre-step / turn-stopping）
+   * 必须显式传 sessionCwd（payload.agent 的 session.header.cwd）；不带 cwd 的调用
+   * 只有 headless 工具路径与 apply 期显式钉死（workspaceDir）/ user 全局库，
+   * 否则会按进程 cwd 建出"跑偏"的空库。
    */
   const ensureStore = (sessionCwd?: string): { store: MemoryStore; engine: DigestEngine } => {
     if (active !== null && sessionCwd === undefined) return active
@@ -183,8 +191,10 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     return active
   }
 
-  // 启动即按回退根建库（首个会话启动如工作区根不同会自动切换）
-  ensureStore()
+  // v0.6.4：启动绑定仅限显式钉死（workspaceDir）或 user 全局库（homedir 基准稳定）；
+  // workspace 自动解析推迟到首个真实会话边（agent/created / pre-step 按会话 cwd 绑定），
+  // 避免在 web 进程中按 process.cwd() 预建一个"跑偏"的空库（曾出现在 DSH 服务 cwd，即本次 bug 的表现）。
+  if (pinnedWorkspace !== null || config.scope === 'user') ensureStore()
 
   // ------------------------------------------------------------ 只读 WebUI 面板挂载（v0.5：设置页 live 可开关）
 
@@ -265,46 +275,67 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
 
   // ------------------------------------------------------------ 生命周期
 
-  // session-start：按会话真实工作区绑定记忆库 + 异步装载 L1 回放 + L3 top-k + 补做未完成的 digest（不阻塞首步）
-  ctx.on('agent/session-start', async (payload: unknown) => {
+  // agent/created（v0.6.4）：DSH 真实的"会话启动/恢复"边——每次 agent 上线都触发
+  // （source: startup=服务启动恢复 / resume / clear / compact，payload 注入 agent）。
+  // 修复背景：v0.6.3 及以前误监听不存在的 `agent/session-start`，该路径从未执行，
+  // 库根绑定 / 视图装载 / digest 补做 / 补交全部失效：库根在 apply 时按进程 cwd 钉死，
+  // web 进程 cwd 非会话工作区 → 记忆写入"跑偏"的空库（本次在 FlexOne014_master 会话发现的 bug）。
+  // 现在每次 agent/created：按会话真实工作区绑定记忆库、根会话装载 L1 回放 + L3 top-k、
+  // subagent 继承父会话视图、补做未完成 digest、补交未提交写入（fail-open，不阻塞后续步骤）。
+  ctx.on('agent/created', async (payload: unknown) => {
     const agent = isObject(payload) ? payload.agent : undefined
     if (!isObject(agent)) return
-    const { store, engine } = ensureStore(sessionCwdOf(agent))
-    const sessionId = sessionIdOf(agent)
     try {
-      const view = await loadSessionView(store, config, agentViews.get(agent))
-      agentViews.set(agent, view)
-      if (sessionId !== '') viewBySession.set(sessionId, view)
-      // v0.3：根会话（无 parent）登记为主动追忆候选
-      if (parentSessionOf(agent) === undefined && sessionId !== '') rootAgents.set(sessionId, agent)
+      const sessionId = sessionIdOf(agent)
+      const parent = parentSessionOf(agent)
+      const previous = agentViews.get(agent)
+      // 1) 按会话真实工作区绑定库根（subagent 通常同工作区 → 命中 storeCache 实例，开销可忽略）
+      const { store, engine } = ensureStore(sessionCwdOf(agent))
+      // 2) 视图：根会话（无父会话或父视图缺失）装载；subagent 继承父会话视图
+      if (parent === undefined || !viewBySession.has(parent)) {
+        const view = await loadSessionView(store, config, previous)
+        agentViews.set(agent, view)
+        if (sessionId !== '') viewBySession.set(sessionId, view)
+        if (parent === undefined && sessionId !== '') rootAgents.set(sessionId, agent)
+      } else {
+        const inherited = viewBySession.get(parent)
+        if (inherited !== undefined) {
+          const view = { ...inherited, reminded: 0 }
+          agentViews.set(agent, view)
+          if (sessionId !== '') viewBySession.set(sessionId, view)
+        }
+      }
       cachedStatus = await store.status()
+      // 3) digest 补做：上次 pending 且 retries 未超限
+      if (store.digestState.pending) {
+        try {
+          await engine.runPending('agent-created')
+        } catch (error) {
+          warn(`[dev-memory] digest 补做失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      // 4) 跨会话遗留的未提交写入补交（fail-open）
+      if (store.vcs.pendingWrites > 0) {
+        try {
+          await store.flushVcs('会话启动补交')
+        } catch (error) {
+          warn(`[dev-memory] 会话启动补交失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      // 5) webServer 可能晚于插件 apply 才就绪 → 首次会话补一次面板挂载
+      ensurePanel()
     } catch (error) {
+      // DSH 的 agent/created 是 serial 且 listener 抛错会回滚 attach → 必须 fail-open，绝不向运行时抛错
       warn(`[dev-memory] 会话视图装载失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
     }
-    // digest 补做：上次 pending 且 retries 未超限
-    if (store.digestState.pending) {
-      try {
-        await engine.runPending('session-start')
-      } catch (error) {
-        warn(`[dev-memory] digest 补做失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
-    // v0.2：跨会话遗留的未提交写入补交（fail-open）
-    if (store.vcs.pendingWrites > 0) {
-      try {
-        await store.flushVcs('会话启动补交')
-      } catch (error) {
-        warn(`[dev-memory] 会话启动补交失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
-    // v0.3/v0.5：webServer 可能晚于插件 apply 才就绪 → 首个会话启动补一次面板挂载
-    ensurePanel()
   })
 
   // pre-step（waterfall）：记录 user 消息 + 引导提醒（预算内；消息不可变时仅 boot 引导）
   ctx.on('agent/pre-step', async (payload: unknown, next: () => Promise<unknown>) => {
+    const stepAgent = isObject(payload) ? payload.agent : undefined
     try {
-      recordMessages(payload, sessionBuffer, ensureStore().store)
+      // v0.6.4：按 payload.agent 的真实工作区绑定（多工作区并存、或插件热重载后首个步骤，都能落到正确库根）
+      recordMessages(payload, sessionBuffer, ensureStore(sessionCwdOf(stepAgent)).store)
     } catch {
       /* 流水记录失败不影响步骤 */
     }
@@ -322,8 +353,10 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   })
 
   // turn-stopping（serial）：digest 沉淀 + 会话边界版本提交（fail-open）
-  ctx.on('agent/turn-stopping', async () => {
-    const { store, engine } = ensureStore()
+  ctx.on('agent/turn-stopping', async (payload: unknown) => {
+    // v0.6.4：turn-stopping 的 payload 同样注入 agent → 按会话真实工作区绑定，digest/提交落到正确库
+    const turnAgent = isObject(payload) ? payload.agent : undefined
+    const { store, engine } = ensureStore(sessionCwdOf(turnAgent))
     try {
       const summaries = await engine.maybeDigest({ key: 'root', messages: sessionBuffer })
       if (summaries !== null && summaries.length > 0) {
@@ -346,17 +379,7 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     }
   })
 
-  // created：subagent 继承父会话视图（v0.3 实现：L1 回放 / L3 top-k 随 parentSession 继承）
-  ctx.on('agent/created', (payload: unknown) => {
-    const agent = isObject(payload) ? payload.agent : undefined
-    if (!isObject(agent)) return
-    const parent = parentSessionOf(agent)
-    if (parent === undefined) return
-    const inherited = viewBySession.get(parent)
-    if (inherited !== undefined && !agentViews.has(agent)) {
-      agentViews.set(agent, { ...inherited, reminded: 0 })
-    }
-  })
+  // （v0.6.4）subagent 视图继承 + 库根绑定已并入上方 agent/created 统一处理（原 created 独立块删除）
 
   // ------------------------------------------------------------ 主动追忆（v0.3，默认关）
 
