@@ -13,6 +13,9 @@
         maxBootTokens: 600
         maxRuntimeTokens: 1200
         maxSpaceTokens: 800
+        # v0.6.6：会话视图（状态块 + L1 回放 + L3）全局预算；L3 默认不注入
+        maxViewTokens: 2000
+        l3Inject: off
         embedding:
           enabled: false
         digest:

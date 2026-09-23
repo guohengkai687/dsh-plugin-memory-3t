@@ -79,6 +79,17 @@ export function applyEffective(target: Config, next: unknown): ConfigChange {
     target.maxSpaceTokens = Math.floor(space)
     change.budgets = true
   }
+  // v0.6.6：会话视图全局预算 + L3 注入方式（下一个会话的首个 pre-step 生效）
+  const view = asNum(n.maxViewTokens)
+  if (view !== undefined && view >= 0 && target.maxViewTokens !== Math.floor(view)) {
+    target.maxViewTokens = Math.floor(view)
+    change.budgets = true
+  }
+  const l3Inject = asStr(n.l3Inject)
+  if ((l3Inject === 'off' || l3Inject === 'salience' || l3Inject === 'query') && target.l3Inject !== l3Inject) {
+    target.l3Inject = l3Inject
+    change.recall = true
+  }
 
   // 注意：storageDir / scope / workspaceDir 不在此处应用（启动期库根绑定，重启生效）
 
@@ -304,6 +315,9 @@ function buildSettingsSchema(z: SettingsDeps['z']): unknown {
     maxBootTokens: z.number(),
     maxRuntimeTokens: z.number(),
     maxSpaceTokens: z.number(),
+    // v0.6.6：会话视图全局预算 + L3 注入方式（off/salience/query）
+    maxViewTokens: z.number(),
+    l3Inject: z.string(),
   })
 }
 
@@ -322,6 +336,8 @@ export const SETTINGS_SURFACE_DEFAULTS = {
   maxBootTokens: 600,
   maxRuntimeTokens: 1200,
   maxSpaceTokens: 800,
+  maxViewTokens: 2000,
+  l3Inject: 'off',
 } as const
 
 // ---------------------------------------------------------------- install

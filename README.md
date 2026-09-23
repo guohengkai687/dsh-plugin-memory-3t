@@ -28,9 +28,9 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 
 | 层 | 目录 | 内容 | 注入方式 | 预算 |
 |---|---|---|---|---|
-| L1 Runtime | `runtime/YYYY-MM-DD.md` | 当日会话流水 | **每会话一次**注入近期摘要 | ≤ 1200 tokens |
+| L1 Runtime | `runtime/YYYY-MM-DD.md` | 当日会话流水 | **每会话一次**注入近期摘要（v0.6.6：剔除本会话自己的 prompt 回放） | ≤ 1200 tokens |
 | L2 Documents | `docs/**/*.md` | 知识笔记（教程/方案/排查） | **不注入**，`devmemory_recall` 按需查 | 0 |
-| L3 Spaces | `spaces/<id>.md` | 原子事实（偏好/决策/实体/上下文） | **每会话一次**注入 top-k + pre-step 提醒 | ≤ 800 tokens |
+| L3 Spaces | `spaces/<id>.md` | 原子事实（偏好/决策/实体/上下文） | **默认不注入**（v0.6.6：`l3Inject` 默认 `off`，按需 recall）；`salience`/`query` 模式每会话一次注入 top-k | ≤ 800 tokens |
 
 分层原则：L2 是"检索层"，完整文档永不主动进 prompt；L1/L3 是"注入层"，各自有 token 硬顶，超预算宁可少注入也不破坏 markdown 结构。
 
@@ -78,9 +78,11 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 | `storageDir` | `.memory` | 记忆库根：相对路径基于基准目录解析（workspace=工作区根 / user=用户主目录）；绝对路径原样 |
 | `scope` | `workspace` | 记忆库粒度（v0.3）：`workspace`（每工作区一库，默认）/ `user`（全局一库，跨工作区共享，默认 `~/.memory`；user 粒度绝不改写工作区 `.gitignore`） |
 | `workspaceDir` | 空 | 工作区根覆盖（v0.3.1）：置为非空路径时 workspace 粒度固定以该目录为基准解析 `storageDir`（忽略会话工作区，用于显式钉死库位）；空 = 自动按会话真实工作区根解析 |
-| `maxBootTokens` | 600 | boot 注入预算 |
+| `maxBootTokens` | 600 | 状态块（原 boot 块）注入预算 |
 | `maxRuntimeTokens` | 1200 | L1 回放预算 |
 | `maxSpaceTokens` | 800 | L3 top-k 预算 |
+| `maxViewTokens` | 2000 | **v0.6.6**：会话视图（状态块 + L1 回放 + L3）**全局**预算，按序扣减剩余额度，防止前一块挤光后面 |
+| `l3Inject` | `off` | **v0.6.6**：L3 长期事实注入方式——`off`（默认，不注入，按需 recall）/ `salience`（按 salience+accesses 取 top-5）/ `query`（按会话首条消息 BM25 检索，门槛 `recall.highScore`）。下一会话生效 |
 | `embedding.enabled` | false | 向量检索开关（Ollama 本地）；开启后 L2/L3 写入同步生成向量，检索走向量+BM25 融合 |
 | `embedding.endpoint` | `http://localhost:11434` | Ollama HTTP API 地址 |
 | `embedding.model` | `nomic-embed-text` | 嵌入模型名 |
@@ -237,6 +239,21 @@ workspace 根 = config.workspaceDir（非空，显式固定）
 >
 > **v0.6.4 修复（保留，仍有效）**：v0.6.3 及以前按 `process.cwd()` 建库（web 服务 cwd 非会话工作区时，记忆全部写入"跑偏"的空库）。v0.6.4 的三条改动：①会话启动边绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；②`agent/pre-step` / `agent/turn-stopping` 按 `payload.agent` 的会话 cwd 复绑库根（多工作区并存、插件热重载后首个步骤也不串库）；③`workspace` 自动解析不再在 apply 期按进程 cwd 急切建库（`workspaceDir` 钉死 / `scope:user` 仍立即绑定）。
 
+## 注入瘦身（v0.6.6）
+
+v0.6.5 把召回内容改成"每会话一次"后，实测仍有三个浪费点，v0.6.6 逐条修掉：
+
+| 问题（实测） | 处置 |
+|---|---|
+| **L3 top-5 用不到还占预算**：48 条 L3 里 20 条 `salience` 已达 1.0，`salience desc, accesses desc` 实际由历史访问次数决定 → 选出的清一色是 8/28 的老发版记录；5 条合计 **922 tokens > 800 预算**，整块被从块尾砍掉一条（`render.ts` 的 `clampTokens` 只从尾部截） | 新增 **`l3Inject`**（默认 `off`）：默认**不注入** L3，需要时由模型 `devmemory_recall` 按需查——与 L2 同一策略。可选 `salience`（旧行为）/ `query`（用会话首条消息跑 BM25，只注入分数达 `recall.highScore` 的命中，`devmemory_recall` 同一套索引） |
+| **单条摘要无长度上限**：一条 277 tokens 的条目独吞 35% 预算 | `renderSpaceBlock` 逐条先将摘要钳制到 **140 tokens**（超长加 `…`），整块不再因单条超长而截断 |
+| **L1 回放把模型已有的内容念一遍**：L1 块 **1481 tokens**，大头是本会话自己的 user prompt 原文回放 | `dropReplayedPrompts`：剔除"此刻已在上下文里"的流水（等值或 500 字截断前缀），只留跨会话流水；整块剔空则不注入该块 |
+| **L1 标题取错行**：原取 `raw.split(/\r?\n/)[0]`，实测取到被截断的 prompt 行（注入里出现 `## - user: …` 畸形标题） | 显式找 `# ` 头（`runtimeHeadingOf`） |
+| **块之间互相挤占**：各块只有独立预算，排前面的块能吃掉整个视图预算（L1 超额的 281 tokens 直接压掉 L3） | 新增 **`maxViewTokens`**（默认 2000）全局预算，按 状态 → L1 → L3 顺序扣减剩余额度（`takeWithinBudget`） |
+| **`clampTokens` 在短文本上死循环**（既有缺陷，被本轮测试暴露）：预算小于截断标记开销时 `Math.max(1, floor(len*0.8))` 会原地踏步 | 每轮至少少 1 字符（`clampTokens` / `clampEntrySummary` 同修） |
+
+> L3 仍然可用、可写：只是默认不再"无差别地推进 prompt"。要恢复旧行为：设置页把「L3 长期事实注入」改为 `按 salience 取 top-5`，或在 `cordis.patch.yml` 里设 `l3Inject: salience`。
+
 ## 诊断与异常记录（v0.4）
 
 插件在**每次记忆管理调用**时自动记录两类内容到 `<库>/diag/events.jsonl`（默认开，`diag.enabled=false` 可整体关闭）：
@@ -386,6 +403,7 @@ npm test              # build + node --test（Windows 沙箱下用 --test-isolat
 - ✅ v0.6.0 完成（插件更名）：`dsh-dev-memory-3t` → **`dsh-plugin-memory-3t`**——目录与 git 仓库、package.json 包名、插件注册名（`src/index.ts` `name`）、设置 `settings.section` 插槽 id（`PLUGIN_ID`）、client bundle 标识、`cordis.patch.yml` id/name、安装命令与全部文档（README/DESIGN/team）同步更名；测试断言同步（`source.plugin`）；版本升至 0.6.0 打包归档 `.memtest-pack` 并重装 headless/web 两 profile（旧归档 `dsh-dev-memory-3t-0.*.tgz` 保留为历史产物）
 - ✅ v0.6.4 完成（库根跑偏修复；**根因判定于 v0.6.5 被纠正，见上「事件勘误」**）：v0.6.3 及以前按 `process.cwd()` 建库（web 服务 cwd 非工作区即"跑偏"）。三条改动**确实有效**：①会话启动边绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；②`pre-step`/`turn-stopping` 按 `payload.agent` 会话 cwd 复绑（多工作区不串库）；③`workspace` 自动解析不再在 apply 期按进程 cwd 急切建库。⚠ 但当时把根因写成"DSH 无 `agent/session-start`"是**错的**，随之写下的"事件清单不含 session-start"回归断言也是错的（v0.6.5 已改为断言**必须注册**）
 - ✅ v0.6.5 完成（事件勘误 + 注入时机重构 + 三项借鉴）：**①事件勘误**——`agent/session-start` 真实存在（payload `{agent, source}`，`agent/created` 无 `source`），v0.6.4 的"不存在"论断纠正，改为**兼听两条边**（幂等 + created→session-start 的 source 升级记录）并用 `source` 处理 `clear`/`compact` 的重装补注；**②注入时机重构**——boot 块静态化（逐请求但逐字节恒定、不破坏 prefix 缓存），会话状态与 L1/L3 召回改为**每会话一次**注入（原为每请求重复，最多约 2600 tokens/轮）；**③三态可用性**（`ok`/`empty`/`unavailable`，故障 ≠ 空库）；**④库根来源守卫**（会话内无法解析真实工作区时拒绝写入、保留读取）；**⑤冷启动 seed**（`devmemory_seed`，无 LLM 从 git/README/manifest/目录生成 L2 骨架 + 候选 L3，不自动写 L3）；**⑥零依赖 MCP stdio 面**（`dev-memory-mcp`，手写 JSON-RPC，无 `@modelcontextprotocol/sdk`）
+- ✅ v0.6.6 完成（注入瘦身）：**①L3 默认不注入**——新增 `l3Inject: off|salience|query`（默认 `off`），实测 48 条 L3 里 20 条 salience 已顶格、排序实际由历史 accesses 决定，选出的全是老发版记录且 5 条 922 tokens > 800 预算被整块截掉；**②`maxViewTokens` 全局预算**（默认 2000，按 状态→L1→L3 顺序扣减，防前块挤光后块）；**③L3 逐条摘要钳制 140 tokens**（单条不再独吞整块）；**④L1 回放去重**（剔除本会话自己的 prompt 回放，实测 L1 块 1481 tokens 大头是重复内容）+ 标题取值修复（原取第一行 → 注入出现 `## - user: …` 畸形标题）；**⑤修 `clampTokens` 短文本死循环**（预算小于截断标记开销时 `Math.max(1, floor(len*0.8))` 原地踏步，v0.1 起潜伏）；设置页新增两项参数（下拉框字段类型）；176/176 测试全绿 0 跳过（含 git 集成 14 项 + MCP 8 项）
 - v0.6（候选）：多库并存切换（named libraries）、recall 结果缓存与面板历史、scope 迁移工具（workspace→user 搬家）
 
 ## License

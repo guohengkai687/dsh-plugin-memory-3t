@@ -34,6 +34,11 @@ export type LocaleKey =
   | 'groupDigestRecall'
   | 'digestMaxMessages'
   | 'recallMinSalience'
+  | 'l3Inject'
+  | 'l3InjectHint'
+  | 'l3InjectOff'
+  | 'l3InjectSalience'
+  | 'l3InjectQuery'
   | 'groupBudgets'
   | 'groupSeed'
   | 'seedEnabled'
@@ -46,6 +51,8 @@ export type LocaleKey =
   | 'maxBootTokens'
   | 'maxRuntimeTokens'
   | 'maxSpaceTokens'
+  | 'maxViewTokens'
+  | 'maxViewTokensHint'
   | 'restartNote'
   | 'save'
   | 'saving'
@@ -91,6 +98,12 @@ export const zh: LocaleDict = {
   groupDigestRecall: 'digest / recall 细调',
   digestMaxMessages: 'digest 触发消息数',
   recallMinSalience: '注入 top-k 最低 salience',
+  l3Inject: 'L3 长期事实注入',
+  l3InjectHint:
+    '默认「不注入」：L3 的 salience 排序选不出与当前任务相关的事实，会拿老条目占预算；需要时让模型用 devmemory_recall 按需查。下一会话生效。',
+  l3InjectOff: '不注入（推荐）',
+  l3InjectSalience: '按 salience 取 top-5',
+  l3InjectQuery: '按会话首条消息检索',
   groupSeed: '冷启动 seed（项目骨架）',
   seedEnabled: '启用 devmemory_seed 工具',
   seedEnabledHint: '库为空时由模型调用，从 git 历史 / package.json / README / 顶层结构生成项目骨架（无 LLM、零成本）。',
@@ -103,6 +116,8 @@ export const zh: LocaleDict = {
   maxBootTokens: 'boot 块',
   maxRuntimeTokens: '运行时流水',
   maxSpaceTokens: 'L3 空间',
+  maxViewTokens: '会话视图总量',
+  maxViewTokensHint: '状态块 + L1 回放 + L3 三块合计上限，按序扣减（防止前一块挤光后面）。',
   restartNote: '工作区根 / 库粒度（scope / workspaceDir / storageDir）在设置页暂不提供修改，属启动期绑定，需编辑配置文件后重启。',
   save: '保存',
   saving: '保存中…',
@@ -147,6 +162,12 @@ export const en: LocaleDict = {
   groupDigestRecall: 'Digest / recall tuning',
   digestMaxMessages: 'Messages before digest',
   recallMinSalience: 'Min salience for boot top-k',
+  l3Inject: 'L3 fact injection',
+  l3InjectHint:
+    'Default “off”: salience ranking cannot tell relevance, so stale facts crowd the budget — let the model call devmemory_recall instead. Takes effect next session.',
+  l3InjectOff: 'Off (recommended)',
+  l3InjectSalience: 'Top-5 by salience',
+  l3InjectQuery: 'Retrieve by first message',
   groupSeed: 'Cold-start seed (project skeleton)',
   seedEnabled: 'Enable the devmemory_seed tool',
   seedEnabledHint:
@@ -161,6 +182,8 @@ export const en: LocaleDict = {
   maxBootTokens: 'Boot block',
   maxRuntimeTokens: 'Runtime stream',
   maxSpaceTokens: 'L3 space',
+  maxViewTokens: 'Session view total',
+  maxViewTokensHint: 'Combined cap for status + L1 replay + L3, deducted in order (no block can starve the rest).',
   restartNote: 'Library root / scope (workspaceDir / scope / storageDir) are boot-time bindings; edit the config file and restart.',
   save: 'Save',
   saving: 'Saving…',

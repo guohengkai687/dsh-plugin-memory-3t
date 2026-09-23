@@ -2,11 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   approximateTokens,
+  clampEntrySummary,
   clampTokens,
+  dropReplayedPrompts,
+  isReplayedPrompt,
+  normalizeForDedup,
   renderBootBlock,
   renderRuntimeBlock,
   renderSpaceBlock,
   renderStatusBlock,
+  takeWithinBudget,
 } from '../dist/render.js'
 
 /** 一份"已完成积累"的库状态（含各种易变字段，用于验证 boot/status 的分工）。 */
@@ -37,6 +42,14 @@ test('render: clampTokens 超预算截断并标记', () => {
   assert.ok(approximateTokens(out) <= 100 + 20)
   assert.ok(out.endsWith('…(记忆注入已按 token 预算截断)'))
   assert.ok(out.length < long.length)
+})
+
+test('render(v0.6.6): clampTokens/clampEntrySummary 在短文本上必须终止（防死循环回归）', () => {
+  // 复现原缺陷：预算小于标记本身的开销时，`Math.max(1, floor(len*0.8))` 在 len<5 时原地踏步
+  const out = clampTokens('极短文本', 1)
+  assert.ok(out.endsWith('…(记忆注入已按 token 预算截断)'), out)
+  assert.equal(clampEntrySummary('极短文本', 1).endsWith('…'), true)
+  assert.equal(clampEntrySummary('极短文本', 0), '')
 })
 
 test('render: boot 块含数据非指令声明与工具指引', () => {
@@ -140,4 +153,71 @@ test('render: runtime 块为空列表返回空串', () => {
 
 test('render: space 块为空返回空串', () => {
   assert.equal(renderSpaceBlock([], 1000), '')
+})
+
+// ---------------------------------------------------------------------------
+// v0.6.6：L3 逐条钳制 / 全局预算 / L1 去重
+// ---------------------------------------------------------------------------
+
+test('render: clampEntrySummary 逐条钳制超长摘要', () => {
+  const short = '偏好：中文回复'
+  assert.equal(clampEntrySummary(short, 100), short)
+  const long = '甲'.repeat(500)
+  const out = clampEntrySummary(long, 100)
+  assert.ok(out.length <= 100, '钳制后不得超过预算：' + out.length)
+  assert.ok(out.endsWith('…'), '应带截断标记')
+  assert.equal(clampEntrySummary(long, 0), '')
+})
+
+test('render: space 块逐条钳制后全文不超预算（修复"最后一条被切半句"）', () => {
+  // 实测根因：5 条各 277/116/198/157/166 tokens 合计 922 > 800 预算 → 整块从块尾砍掉一条
+  const entries = Array.from({ length: 5 }, (_, i) => ({ id: `e${i}`, summary: '甲'.repeat(300), tags: [] }))
+  const out = renderSpaceBlock(entries, 300, 50)
+  assert.ok(approximateTokens(out) <= 300, '整块不得超预算：' + approximateTokens(out))
+  const lines = out.split('\n').filter((line) => line.startsWith('- '))
+  assert.equal(lines.length, 5, '5 条都应保留（各自钳制，而不是把整块砍到尾）')
+  assert.ok(!out.includes('记忆注入已按 token 预算截断'), '逐条钳制后不应触发整块截断')
+})
+
+test('render: takeWithinBudget 消费型额度（防止前块挤光后块）', () => {
+  assert.equal(takeWithinBudget(500, 1200), 500, '想要的比剩余多时只能拿剩余')
+  assert.equal(takeWithinBudget(500, 100), 100)
+  assert.equal(takeWithinBudget(0, 100), 0)
+  assert.equal(takeWithinBudget(-5, 100), 0, '负剩余归零')
+})
+
+test('render: dropReplayedPrompts 剔除本会话已可见的用户消息（保留跨会话流水）', () => {
+  const block = [
+    '[dev-memory L1 流水] 最近会话（摘要）',
+    '## 2026-09-23',
+    '- user: 帮我重构这个插件的注入逻辑，把会话视图改成一次性注入',
+    '- user: 跨会话留下的旧流水应当保留，因为它不在当前上下文里',
+  ].join('\n')
+  const out = dropReplayedPrompts(block, ['帮我重构这个插件的注入逻辑，把会话视图改成一次性注入'])
+  assert.ok(!out.includes('帮我重构'), '重复回放必须被剔除：' + out)
+  assert.ok(out.includes('跨会话留下的旧流水'), '非重复流水必须保留')
+  assert.ok(out.includes('## 2026-09-23'), '标题结构不得破坏')
+})
+
+test('render: 写入侧 500 字截断的前缀也能识别为重复', () => {
+  const prompt = '乙'.repeat(600) // L1 只存前 500 字
+  const known = ['乙'.repeat(600)]
+  assert.ok(isReplayedPrompt('乙'.repeat(500), known), '截断前缀应判为重复')
+  assert.ok(!isReplayedPrompt('丙'.repeat(500), known))
+  // 短句不做前缀判定，避免误杀
+  assert.ok(!isReplayedPrompt('继续', ['继续写代码']))
+})
+
+test('render: dropReplayedPrompts 全部被剔除时返回空串（调用方据此不注入该块）', () => {
+  const only = '这条流水的内容此刻已经完整地出现在当前会话上下文里了'
+  const block = ['[dev-memory L1 流水] 最近会话（摘要）', '## 2026-09-23', `- user: ${only}`].join('\n')
+  assert.equal(dropReplayedPrompts(block, [only]), '')
+  assert.equal(dropReplayedPrompts('', []), '')
+  // 无内容行（输入侧就没回放可去）不得被误判为空
+  const empty = '[dev-memory L1 流水] 最近会话（摘要）'
+  assert.equal(dropReplayedPrompts(empty, [only]), empty)
+})
+
+test('render: normalizeForDedup 折叠空白（与写入侧对齐）', () => {
+  assert.equal(normalizeForDedup('  a\n\tb   c '), 'a b c')
 })

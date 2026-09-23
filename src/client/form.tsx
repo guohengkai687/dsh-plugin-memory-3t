@@ -36,7 +36,18 @@ export interface NumberField {
   step?: number
 }
 
-export type Field = ToggleField | NumberField
+/** 枚举字段（v0.6.6）：存字符串，选项值即配置值，标签走 locale 或直接给短标签。 */
+export interface SelectField {
+  kind: 'select'
+  group?: string
+  key: string
+  label: LocaleKey
+  hint?: LocaleKey
+  /** 选项：value 写入配置，label 为 locale key 或已本地化文本。 */
+  options: Array<{ value: string; label: LocaleKey }>
+}
+
+export type Field = ToggleField | NumberField | SelectField
 
 export interface DevMemoryFormProps {
   scope: SettingsScope<Record<string, unknown>>
@@ -215,6 +226,19 @@ export function DevMemoryForm({ scope, t, fields, compact = false, onDirtyChange
                     disabled={saving}
                     onChange={(event) => stage(field, event.target.checked)}
                   />
+                ) : field.kind === 'select' ? (
+                  <select
+                    style={{ ...style.input, width: 172, paddingRight: 4 }}
+                    value={typeof fieldValue(field) === 'string' ? (fieldValue(field) as string) : ''}
+                    disabled={saving}
+                    onChange={(event) => stage(field, event.target.value)}
+                  >
+                    {field.options.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {t(option.label)}
+                      </option>
+                    ))}
+                  </select>
                 ) : (
                   <input
                     type="number"
@@ -273,6 +297,18 @@ export const SECTION_FIELDS: Field[] = [
   { kind: 'number', group: 'embedding', key: 'timeoutMs', label: 'embeddingTimeoutMs', min: 0, step: 100 },
   { kind: 'number', group: 'digest', key: 'maxMessages', label: 'digestMaxMessages', min: 0 },
   { kind: 'number', group: 'recall', key: 'minSalience', label: 'recallMinSalience', min: 0, step: 0.05 },
+  // v0.6.6：L3 长期事实注入方式（默认不注入，按需 recall）
+  {
+    kind: 'select',
+    key: 'l3Inject',
+    label: 'l3Inject',
+    hint: 'l3InjectHint',
+    options: [
+      { value: 'off', label: 'l3InjectOff' },
+      { value: 'salience', label: 'l3InjectSalience' },
+      { value: 'query', label: 'l3InjectQuery' },
+    ],
+  },
   // v0.6.5：冷启动 seed（无 LLM 生成项目骨架）
   { kind: 'toggle', group: 'seed', key: 'enabled', label: 'seedEnabled', hint: 'seedEnabledHint' },
   { kind: 'toggle', group: 'seed', key: 'auto', label: 'seedAuto', hint: 'seedAutoHint' },
@@ -281,6 +317,7 @@ export const SECTION_FIELDS: Field[] = [
   { kind: 'number', key: 'maxBootTokens', label: 'maxBootTokens', min: 0, step: 100 },
   { kind: 'number', key: 'maxRuntimeTokens', label: 'maxRuntimeTokens', min: 0, step: 100 },
   { kind: 'number', key: 'maxSpaceTokens', label: 'maxSpaceTokens', min: 0, step: 100 },
+  { kind: 'number', key: 'maxViewTokens', label: 'maxViewTokens', hint: 'maxViewTokensHint', min: 0, step: 100 },
 ]
 
 /** 可配置卡片（Plugins 选项卡）的紧凑字段表。 */

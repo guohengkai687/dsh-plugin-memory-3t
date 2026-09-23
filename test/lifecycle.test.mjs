@@ -243,7 +243,8 @@ test('lifecycle: subagent 继承父会话视图（L1 回放 / L3 top-k）', asyn
   try {
     process.chdir(ws)
     const { ctx, calls } = makeStubContext()
-    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    // v0.6.6：L3 默认不注入（off），本用例校验"显式开启 + subagent 继承"路径
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false }, l3Inject: 'salience' })
     await settle()
 
     // 手工种一条高活跃 L3（模拟已积累的记忆）
@@ -421,6 +422,159 @@ test('lifecycle: 兼听 session-start/created（幂等 + clear/compact 重装 + 
     await onCreated({ agent: agent2 })
     const onlyCreated = await preStep(ask(agent2, 'm6'), next)
     assert.equal(pluginMsgs(onlyCreated).length, 1, '仅 created 时也应注入会话视图')
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// v0.6.6：L3 默认不注入 + L1 回放去重 + 视图全局预算 + 标题取值修复
+// ---------------------------------------------------------------------------
+
+test('lifecycle(v0.6.6): L3 默认不注入（off）；显式 salience 才注入', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-l3off-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    await mkdir(join(ws, '.memory', 'spaces'), { recursive: true })
+    await writeFile(
+      join(ws, '.memory', 'spaces', 'ctx-old-fact.md'),
+      [
+        '---',
+        'id: ctx-old-fact',
+        'kind: context',
+        'created: 2026-01-01T00:00:00+08:00',
+        'updated: 2026-01-01T00:00:00+08:00',
+        'salience: 0.9',
+        'accesses: 3',
+        'tags: [老事实]',
+        'links: []',
+        '---',
+        '这条老事实默认不该被注入进 prompt',
+        '',
+      ].join('\n'),
+    )
+
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const next = async () => ({ kind: 'enter', messages: [{ id: 'x', role: 'user', content: [{ type: 'text', text: '原始' }] }] })
+    const ask = (agent, id) => ({
+      agent,
+      messages: [{ id, role: 'user', content: [{ type: 'text', text: '随便问一句不触发任何回忆' }] }],
+      turn: 1,
+      step: 1,
+    })
+    const viewOf = (out) => out.messages.find((m) => m?.source?.form === 'recall')
+
+    // 默认 off：即使库里有高 salience 条目，也不得出现在会话视图里
+    const agentOff = { id: 'off1' }
+    await created({ agent: agentOff, source: 'startup' })
+    const offView = viewOf(await preStep(ask(agentOff, 'm1'), next))
+    if (offView !== undefined) {
+      assert.ok(!JSON.stringify(offView).includes('这条老事实'), '默认 off 时不得注入 L3：' + JSON.stringify(offView))
+    }
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle(v0.6.6): L1 回放剔除本会话自己的 prompt，保留跨会话流水', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-l1dedup-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+
+    // 手工种一份历史流水：一条与本次会话 prompt 相同（应被剔除），一条跨会话旧流水（应保留）
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const runtimeDir = join(ws, '.memory', 'runtime')
+    await mkdir(runtimeDir, { recursive: true })
+    const now = new Date()
+    const name = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.md`
+    const samePrompt = '帮我把会话视图的注入时机改成每会话一次并去掉重复的 prompt 回放'
+    await writeFile(
+      join(runtimeDir, name),
+      [`# ${name.slice(0, -3)}`, '', `- user: ${samePrompt}`, '- user: 上一轮会话我们讨论过索引陈旧的修复方案，这条应保留'].join('\n') + '\n',
+    )
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const agent = { id: 'l1a' }
+    await created({ agent, source: 'startup' })
+
+    const next = async () => ({ kind: 'enter', messages: [{ id: 'x', role: 'user', content: [{ type: 'text', text: 'ok' }] }] })
+    const out = await preStep(
+      {
+        agent,
+        messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: samePrompt }] }],
+        turn: 1,
+        step: 1,
+        signal: undefined,
+      },
+      next,
+    )
+    const view = out.messages.find((m) => m?.source?.form === 'recall')
+    assert.ok(view !== undefined, '应注入会话视图')
+    const text = JSON.stringify(view)
+    assert.ok(!text.includes('帮我把会话视图的注入时机'), '本会话 prompt 不得回放：' + text)
+    assert.ok(text.includes('上一轮会话我们讨论过索引陈旧'), '跨会话流水应保留：' + text)
+    // v0.6.6 标题修复：注入里应是 `## 日期`，不再是畸形标题（原取第一行 → 可能取到 prompt 行）
+    assert.ok(text.includes(`## ${name.slice(0, -3)}`), '标题应为日期：' + text)
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle(v0.6.6): maxViewTokens 全局兜底（任何块单独预算再大也压得住）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-viewbudget-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    // 各块预算放大、全局预算收紧到 100：视图总量必须被全局预算压住
+    apply(ctx, {
+      storageDir: '.memory',
+      vcs: { enabled: false },
+      maxViewTokens: 100,
+      maxRuntimeTokens: 100000,
+      maxBootTokens: 100000,
+    })
+    await settle()
+
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const runtimeDir = join(ws, '.memory', 'runtime')
+    await mkdir(runtimeDir, { recursive: true })
+    const now = new Date()
+    const name = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.md`
+    await writeFile(join(runtimeDir, name), [`# ${name.slice(0, -3)}`, '', '- user: 丙'.repeat(400)].join('\n') + '\n')
+
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const agent = { id: 'vb1' }
+    await created({ agent, source: 'startup' })
+
+    const next = async () => ({ kind: 'enter', messages: [] })
+    const out = await preStep(
+      { agent, messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: '不同内容，避免被去重' }] }], turn: 1, step: 1 },
+      next,
+    )
+    const view = out.messages.find((m) => m?.source?.form === 'recall')
+    assert.ok(view !== undefined, '应注入会话视图')
+    const total = view.content.map((block) => block.text).join('\n')
+    const { approximateTokens } = await import('../dist/render.js')
+    assert.ok(approximateTokens(total) <= 140, '视图总量应被 maxViewTokens 压住，实测 ' + approximateTokens(total))
   } finally {
     process.chdir(cwd)
     await settle()

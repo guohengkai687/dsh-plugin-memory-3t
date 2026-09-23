@@ -258,6 +258,19 @@ window.__ModuleLoader__.load({
 									checked: fieldValue(field) === true,
 									disabled: saving,
 									onChange: (event) => stage(field, event.target.checked)
+								}) : field.kind === "select" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("select", {
+									style: {
+										...style$1.input,
+										width: 172,
+										paddingRight: 4
+									},
+									value: typeof fieldValue(field) === "string" ? fieldValue(field) : "",
+									disabled: saving,
+									onChange: (event) => stage(field, event.target.value),
+									children: field.options.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: option.value,
+										children: t(option.label)
+									}, option.value))
 								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
 									type: "number",
 									style: style$1.input,
@@ -413,6 +426,26 @@ window.__ModuleLoader__.load({
 				step: .05
 			},
 			{
+				kind: "select",
+				key: "l3Inject",
+				label: "l3Inject",
+				hint: "l3InjectHint",
+				options: [
+					{
+						value: "off",
+						label: "l3InjectOff"
+					},
+					{
+						value: "salience",
+						label: "l3InjectSalience"
+					},
+					{
+						value: "query",
+						label: "l3InjectQuery"
+					}
+				]
+			},
+			{
 				kind: "toggle",
 				group: "seed",
 				key: "enabled",
@@ -461,6 +494,14 @@ window.__ModuleLoader__.load({
 				kind: "number",
 				key: "maxSpaceTokens",
 				label: "maxSpaceTokens",
+				min: 0,
+				step: 100
+			},
+			{
+				kind: "number",
+				key: "maxViewTokens",
+				label: "maxViewTokens",
+				hint: "maxViewTokensHint",
 				min: 0,
 				step: 100
 			}
@@ -551,6 +592,11 @@ window.__ModuleLoader__.load({
 			groupDigestRecall: "digest / recall 细调",
 			digestMaxMessages: "digest 触发消息数",
 			recallMinSalience: "注入 top-k 最低 salience",
+			l3Inject: "L3 长期事实注入",
+			l3InjectHint: "默认「不注入」：L3 的 salience 排序选不出与当前任务相关的事实，会拿老条目占预算；需要时让模型用 devmemory_recall 按需查。下一会话生效。",
+			l3InjectOff: "不注入（推荐）",
+			l3InjectSalience: "按 salience 取 top-5",
+			l3InjectQuery: "按会话首条消息检索",
 			groupSeed: "冷启动 seed（项目骨架）",
 			seedEnabled: "启用 devmemory_seed 工具",
 			seedEnabledHint: "库为空时由模型调用，从 git 历史 / package.json / README / 顶层结构生成项目骨架（无 LLM、零成本）。",
@@ -563,6 +609,8 @@ window.__ModuleLoader__.load({
 			maxBootTokens: "boot 块",
 			maxRuntimeTokens: "运行时流水",
 			maxSpaceTokens: "L3 空间",
+			maxViewTokens: "会话视图总量",
+			maxViewTokensHint: "状态块 + L1 回放 + L3 三块合计上限，按序扣减（防止前一块挤光后面）。",
 			restartNote: "工作区根 / 库粒度（scope / workspaceDir / storageDir）在设置页暂不提供修改，属启动期绑定，需编辑配置文件后重启。",
 			save: "保存",
 			saving: "保存中…",
@@ -606,6 +654,11 @@ window.__ModuleLoader__.load({
 			groupDigestRecall: "Digest / recall tuning",
 			digestMaxMessages: "Messages before digest",
 			recallMinSalience: "Min salience for boot top-k",
+			l3Inject: "L3 fact injection",
+			l3InjectHint: "Default “off”: salience ranking cannot tell relevance, so stale facts crowd the budget — let the model call devmemory_recall instead. Takes effect next session.",
+			l3InjectOff: "Off (recommended)",
+			l3InjectSalience: "Top-5 by salience",
+			l3InjectQuery: "Retrieve by first message",
 			groupSeed: "Cold-start seed (project skeleton)",
 			seedEnabled: "Enable the devmemory_seed tool",
 			seedEnabledHint: "Lets the model generate a project skeleton from git history / package.json / README / top-level layout. No LLM, zero cost.",
@@ -618,6 +671,8 @@ window.__ModuleLoader__.load({
 			maxBootTokens: "Boot block",
 			maxRuntimeTokens: "Runtime stream",
 			maxSpaceTokens: "L3 space",
+			maxViewTokens: "Session view total",
+			maxViewTokensHint: "Combined cap for status + L1 replay + L3, deducted in order (no block can starve the rest).",
 			restartNote: "Library root / scope (workspaceDir / scope / storageDir) are boot-time bindings; edit the config file and restart.",
 			save: "Save",
 			saving: "Saving…",

@@ -108,6 +108,20 @@ export interface VcsConfig {
 /** 记忆库粒度：workspace（每工作区一库，默认）/ user（全局一库，v0.3）。 */
 export type Scope = 'workspace' | 'user'
 
+/**
+ * L3 长期事实的注入方式（v0.6.6）。
+ *
+ * 背景（实测）：L3 的 `salience desc, accesses desc` top-5 与"当前任务是否相关"
+ * 无关——48 条里 20 条 salience 已达 1.0，排序实际由历史 accesses 决定，
+ * 选出的清一色是老发版记录；且单条摘要无长度上限，5 条即 922 tokens > 800 预算，
+ * 整块被从块尾砍掉一条。
+ *
+ * - `off`（默认）：**不注入** L3。需要时用 `devmemory_recall` 按需查（与 L2 同一策略）。
+ * - `salience`：沿用旧行为（按 salience/accesses 取 top-k，逐条钳制）。
+ * - `query`：用会话首条用户消息跑 BM25，只注入命中且分数达 `recall.highScore` 的 top-k。
+ */
+export type L3Inject = 'off' | 'salience' | 'query'
+
 export interface Config {
   /** 记忆库根。相对路径基于基准目录解析：workspace 基准 = 会话工作区根；user 基准 = 用户主目录；绝对路径原样使用。 */
   storageDir: string
@@ -122,6 +136,10 @@ export interface Config {
   maxBootTokens: number
   maxRuntimeTokens: number
   maxSpaceTokens: number
+  /** 会话视图（状态块 + L1 回放 + L3 块）一次性注入的**全局**预算（v0.6.6）。 */
+  maxViewTokens: number
+  /** L3 长期事实注入方式（v0.6.6，默认 off = 不注入）。 */
+  l3Inject: L3Inject
   embedding: EmbeddingConfig
   digest: DigestConfig
   recall: RecallConfig
@@ -146,6 +164,10 @@ export const DEFAULT_CONFIG: Config = {
   maxBootTokens: 600,
   maxRuntimeTokens: 1200,
   maxSpaceTokens: 800,
+  maxViewTokens: 2000,
+  // v0.6.6：默认不注入 L3——salience 排序选不出"相关"，只会把老条目顶上来占预算；
+  // 需要时由模型用 devmemory_recall 按需查（与 L2 一致）。
+  l3Inject: 'off',
   embedding: { enabled: false, endpoint: 'http://localhost:11434', model: 'nomic-embed-text', timeoutMs: 3000 },
   digest: { maxMessages: 24, maxPromote: 20, maxRetries: 2 },
   recall: { defaultLimit: 10, minSalience: 0.25, highScore: 0.6 },
@@ -211,6 +233,9 @@ export function mergeConfig(partial: unknown): Config {
     maxBootTokens: clampNonNegative(p.maxBootTokens, DEFAULT_CONFIG.maxBootTokens),
     maxRuntimeTokens: clampNonNegative(p.maxRuntimeTokens, DEFAULT_CONFIG.maxRuntimeTokens),
     maxSpaceTokens: clampNonNegative(p.maxSpaceTokens, DEFAULT_CONFIG.maxSpaceTokens),
+    maxViewTokens: clampNonNegative(p.maxViewTokens, DEFAULT_CONFIG.maxViewTokens),
+    // v0.6.6：只认三个合法值，其余（含未配置）落回默认 off
+    l3Inject: p.l3Inject === 'salience' || p.l3Inject === 'query' ? p.l3Inject : DEFAULT_CONFIG.l3Inject,
     embedding: {
       enabled: embedding.enabled === true,
       endpoint:

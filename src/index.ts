@@ -38,7 +38,7 @@ import { resolve } from 'node:path'
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
-import { renderBootBlock, renderStatusBlock, type StoreStatus } from './render.js'
+import { approximateTokens, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget, type StoreStatus } from './render.js'
 import { seedLibrary } from './seed.js'
 import { resolveRoot } from './paths.js'
 import { loadMemorySkillContent, MEMORY_SKILL_DESCRIPTION, MEMORY_SKILL_INVOCATION, MEMORY_SKILL_NAME, MEMORY_SKILL_WHEN_TO_USE } from './skill.js'
@@ -70,7 +70,11 @@ interface AgentView {
   /** 易变状态块（v0.6.5：原在 boot 块里逐请求注入，现随本视图一次性注入）。 */
   status: string
   runtime: string
-  spaces: string
+  /**
+   * v0.6.6：L3 块改为**惰性**渲染——只在首个 pre-step 注入时按 `config.l3Inject`
+   * 决定要不要、以及怎么取（`query` 模式需要当时的用户消息）。
+   */
+  l3: string | null
   reminded: number
   /** v0.6.5：会话视图是否已一次性注入过（每会话一次，clear/compact 后重置）。 */
   injected: boolean
@@ -89,6 +93,21 @@ const RECALL_REMINDER =
 
 /** 近邻会话消息缓冲（环形，digest 候选源之一）。 */
 const SESSION_BUFFER_LIMIT = 64
+
+/** L1 回放每天最多取多少行（v0.6.6）。 */
+const L1_MAX_LINES_PER_DAY = 12
+
+/** L3 单条摘要的近似 token 上限（v0.6.6：逐条钳制，避免单条独吞整块预算）。 */
+const L3_ENTRY_MAX_TOKENS = 140
+
+/** L3 注入条数上限（v0.6.6）。 */
+const L3_TOP_K = 5
+
+/** query 模式检索用的最近用户消息最长字符数（v0.6.6）。 */
+const L3_QUERY_MAX_CHARS = 500
+
+/** 会话缓冲区取多少条最近用户消息用于 L1 去重 / L3 检索（v0.6.6）。 */
+const RECENT_PROMPT_LIMIT = 8
 
 function createPluginMessage(text: string, form: string, summary?: string): Record<string, unknown> {
   return {
@@ -456,15 +475,25 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   // pre-step（waterfall）：记录 user 消息 + **每会话一次**的会话视图注入 + 引导提醒
   ctx.on('agent/pre-step', async (payload: unknown, next: () => Promise<unknown>) => {
     const stepAgent = isObject(payload) ? payload.agent : undefined
+    let stepStore: MemoryStore | null = null
     try {
       // v0.6.4：按 payload.agent 的真实工作区绑定（多工作区并存、或插件热重载后首个步骤，都能落到正确库根）
-      recordMessages(payload, sessionBuffer, ensureStore(sessionCwdOf(stepAgent), { sessionContext: true }).store)
+      stepStore = ensureStore(sessionCwdOf(stepAgent), { sessionContext: true }).store
+      recordMessages(payload, sessionBuffer, stepStore)
     } catch {
       /* 流水记录失败不影响步骤 */
     }
-    // v0.6.5：召回内容（状态块 + L1 回放 + L3 top-k）**每会话只注入一次**。
+    // v0.6.5：召回内容（状态块 + L1 回放 + L3 块）**每会话只注入一次**。
     // 机会式触发：视图就绪后的首个 pre-step 注入（不依赖会话启动边与首个 pre-step 的时序）。
-    const viewText = takeSessionViewInjection(stepAgent, agentViews)
+    // v0.6.6：注入前用会话缓冲区尾部做两件事——L1 去重（剔除此刻已在上下文里的用户消息）
+    // 与 L3 惰性取值（query 模式按最近用户消息检索）。
+    const recentPrompts = sessionBuffer.slice(-RECENT_PROMPT_LIMIT).map((message) => message.text)
+    let viewText: string | null = null
+    try {
+      viewText = await takeSessionViewInjection(stepAgent, agentViews, stepStore, config, recentPrompts, warn)
+    } catch (error) {
+      warn(`[dev-memory] 会话视图注入计算失败（降级跳过）: ${error instanceof Error ? error.message : String(error)}`)
+    }
     const reminder = computeReminder(payload, agentViews)
     if (viewText === null && reminder === null) return next()
     try {
@@ -476,7 +505,7 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
           createPluginMessage(
             viewText,
             'recall',
-            'Session memory view (status + L1 replay + L3 top-k), injected once per session',
+            'Session memory view (status + L1 replay + optional L3 top-k), injected once per session',
           ),
         )
       }
@@ -660,36 +689,30 @@ function computeReminder(payload: unknown, views: WeakMap<object, AgentView>): {
   return { text: RECALL_REMINDER }
 }
 
-/** 装载会话视图：L1 最近 2 日流水摘要 + L3 高活跃事实 top-k（受 token 预算钳制）。 */
+/**
+ * 装载会话视图（v0.6.6：L3 部分改为惰性）：状态块 + L1 最近 2 日流水摘要。
+ *
+ * 这里**不读 L3**——L3 块由 `takeSessionViewInjection` 在首个 pre-step 按需构建
+ * （`config.l3Inject` 默认 `off` 时一次都不查库；`query` 模式还需要当时的用户消息）。
+ *
+ * @param store - 当前会话工作区的记忆库。
+ * @param config - 运行中配置（预算）。
+ * @param previous - 上一个视图（保留 reminded 计数）。
+ * @param knownPrompts - 已在本会话上下文里的用户消息（L1 回放去重用）。
+ */
 async function loadSessionView(
   store: MemoryStore,
   config: Config,
   previous: AgentView | undefined,
+  knownPrompts: readonly string[] = [],
 ): Promise<AgentView> {
   const status = await store.status()
-  const runtimeLines: string[] = []
-  const now = new Date()
-  for (let offset = 0; offset < 2; offset++) {
-    const date = new Date(now.getTime() - offset * 86_400_000)
-    const raw = await store.readRuntime(date)
-    const heading = raw.split(/\r?\n/)[0]?.trim() ?? ''
-    const content = raw
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith('- ') || line.startsWith('## '))
-      .slice(0, 24)
-    if (content.length > 0) runtimeLines.push(`## ${heading || date.toISOString().slice(0, 10)}`, ...content.slice(0, 12))
-  }
-  const entries = await store.listEntries()
-  const top = entries
-    .filter((e) => e.salience >= config.recall.minSalience)
-    .sort((a, b) => b.salience - a.salience || b.accesses - a.accesses)
-    .slice(0, 5)
-  const spaces = top.map((e) => ({ summary: e.summary, tags: e.tags }))
+  const runtimeLines = await collectRuntimeLines(store, knownPrompts)
   return {
     // v0.6.5：易变状态块与会话视图一起**只注入一次**（原在 boot 块里逐请求注入）
     status: renderStatusBlock(status, config.maxBootTokens),
     runtime: renderRuntimeFromLines(runtimeLines, config),
-    spaces: renderSpacesFromEntries(spaces, config),
+    l3: null,
     reminded: previous?.reminded ?? 0,
     // 每次会话启动（含 clear/compact 重装）都重置为未注入，交给 pre-step 做一次性注入
     injected: false,
@@ -697,33 +720,148 @@ async function loadSessionView(
 }
 
 /**
- * 取出并消费"每会话一次"的会话视图注入文本（v0.6.5）。
+ * 收集 L1 回放行（今天 + 昨天，各最多 12 行）并剔除"此刻已在上下文里"的用户消息。
+ *
+ * v0.6.6 修两处：
+ * - **标题取值**：原取 `raw.split(/\r?\n/)[0]`，但 runtime 文件头之后可能被追加过
+ *   别的内容（如 digest 补写），实测取到的是被截断的 prompt 而不是 `# 日期` 头，
+ *   注入里出现 `## - user: …` 畸形标题。改为显式找 `# ` 头。
+ * - **自我回放**：L1 是每个 user 消息的原文记录，会话内回放等于把模型已有的内容
+ *   再念一遍（实测占 L1 块大头）。按"已在本会话上下文"的文本去重后，
+ *   L1 块通常只剩跨会话流水——那才是回放的价值。
+ */
+async function collectRuntimeLines(store: MemoryStore, knownPrompts: readonly string[]): Promise<string[]> {
+  const runtimeLines: string[] = []
+  const now = new Date()
+  for (let offset = 0; offset < 2; offset++) {
+    const date = new Date(now.getTime() - offset * 86_400_000)
+    const raw = await store.readRuntime(date)
+    const heading = runtimeHeadingOf(raw) || date.toISOString().slice(0, 10)
+    const content: string[] = []
+    const seen = new Set<string>()
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.startsWith('- ') && !line.startsWith('## ')) continue
+      if (content.length >= L1_MAX_LINES_PER_DAY) break
+      if (line.startsWith('- ')) {
+        const text = line.slice(2)
+        if (knownPrompts.length > 0 && isReplayedPrompt(text, knownPrompts)) continue
+        const key = normalizeForDedup(text)
+        if (seen.has(key)) continue
+        seen.add(key)
+      }
+      content.push(line)
+    }
+    if (content.length > 0) runtimeLines.push(`## ${heading}`, ...content)
+  }
+  return runtimeLines
+}
+
+/** runtime 文件的 `# YYYY-MM-DD` 头（v0.6.6 修复：不再拿第一行当标题）。 */
+function runtimeHeadingOf(raw: string): string {
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('# ')) return trimmed.slice(2).trim().replace(/\.md$/iu, '')
+    if (trimmed !== '') break
+  }
+  return ''
+}
+
+/**
+ * 取出并消费"每会话一次"的会话视图注入文本（v0.6.5；v0.6.6 加全局预算与 L3 惰性）。
+ *
  * 视图未就绪（会话启动尚未装载）/ 已注入过 / 无内容 → null。
  * 消费语义：一旦注入就置 `injected = true`，此后本会话不再重复注入
  * （clear/compact 时 loadSessionView 会重置该标记，从而实现"压缩后补注一次"）。
+ *
+ * 三块按顺序在**一个全局预算**内渲染：状态 → L1 → L3。前面块花掉的额度会从
+ * 后面块的可用预算里扣掉，杜绝"排序在前的块挤光整个视图预算"（v0.6.6 修复）。
  */
-function takeSessionViewInjection(agent: unknown, views: WeakMap<object, AgentView>): string | null {
+async function takeSessionViewInjection(
+  agent: unknown,
+  views: WeakMap<object, AgentView>,
+  store: MemoryStore | null,
+  config: Config,
+  recentPrompts: readonly string[] = [],
+  onDegrade?: (message: string) => void,
+): Promise<string | null> {
   if (!isObject(agent)) return null
   const view = views.get(agent)
   if (view === undefined || view.injected) return null
   view.injected = true
-  const parts = [view.status, view.runtime, view.spaces].filter((part) => part !== '')
-  return parts.length > 0 ? parts.join('\n\n') : null
+
+  let remaining = Math.max(0, config.maxViewTokens)
+  const blocks: string[] = []
+  const push = (text: string, budget: number): void => {
+    if (text === '' || budget <= 0) return
+    const clamped = clampTokens(text, budget)
+    remaining -= approximateTokens(clamped)
+    if (clamped !== '') blocks.push(clamped)
+  }
+
+  // 状态块：诊断/索引陈旧/降级这类安全信号优先级最高，先满足
+  const statusBudget = takeWithinBudget(remaining, config.maxBootTokens)
+  push(view.status, statusBudget)
+  // L1 回放：去掉已在上下文里的用户消息（v0.6.6），再按剩余额度注入
+  const runtimeBudget = takeWithinBudget(remaining, config.maxRuntimeTokens)
+  push(dropReplayedPrompts(view.runtime, recentPrompts), runtimeBudget)
+  // L3（v0.6.6 惰性 + 默认关闭）
+  if (config.l3Inject !== 'off' && remaining > 0) {
+    if (view.l3 === null) view.l3 = await lazyL3Block(store, config, recentPrompts)
+    if (view.l3 === null) {
+      // query 模式检索失败：降级为不注入（fail-open），交给调用方记一条诊断
+      view.l3 = ''
+      onDegrade?.('L3 query 注入失败（降级跳过）')
+    }
+    push(view.l3, takeWithinBudget(remaining, config.maxSpaceTokens))
+  }
+  return blocks.length > 0 ? blocks.join('\n\n') : null
 }
 
-import { renderRuntimeBlock, renderSpaceBlock, clampTokens } from './render.js'
+/**
+ * 惰性构建 L3 块（v0.6.6，异步）：`salience` 按 salience/accesses 取 top-k；
+ * `query` 用最近用户消息跑 BM25，只保留分数达 `recall.highScore` 的命中。
+ * 逐条摘要钳制交给 `renderSpaceBlock`（单条超长不再挤掉整块）。
+ *
+ * 失败不抛（fail-open）：返回 `null` 表示 query 模式检索失败，由调用方记一条诊断。
+ *
+ * @returns 块文本 / null（检索失败）
+ */
+async function lazyL3Block(
+  store: MemoryStore | null,
+  config: Config,
+  recentPrompts: readonly string[],
+): Promise<string | null> {
+  if (store === null || config.l3Inject === 'off') return ''
+  if (config.l3Inject === 'query') {
+    // 只取最近一条用户消息作查询（拼接多条会引入跨话题噪声）
+    const query = (recentPrompts.at(-1) ?? '').slice(0, L3_QUERY_MAX_CHARS).trim()
+    if (query === '') return ''
+    try {
+      const result = await store.recall(query, { layers: ['l3'], maxResults: L3_TOP_K, touch: false })
+      const hits = result.l3.filter((hit) => hit.score >= config.recall.highScore).slice(0, L3_TOP_K)
+      if (hits.length === 0) return ''
+      const byId = new Map((await store.listEntries()).map((entry) => [entry.id, entry]))
+      const picked = hits
+        .map((hit) => byId.get(hit.id))
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
+        .map((entry) => ({ id: entry.id, summary: entry.summary, tags: entry.tags }))
+      return renderSpaceBlock(picked, config.maxSpaceTokens, L3_ENTRY_MAX_TOKENS)
+    } catch {
+      return null
+    }
+  }
+  const entries = await store.listEntries()
+  const top = entries
+    .filter((entry) => entry.salience >= config.recall.minSalience)
+    .sort((a, b) => b.salience - a.salience || b.accesses - a.accesses)
+    .slice(0, L3_TOP_K)
+    .map((entry) => ({ id: entry.id, summary: entry.summary, tags: entry.tags }))
+  return renderSpaceBlock(top, config.maxSpaceTokens, L3_ENTRY_MAX_TOKENS)
+}
 
 function renderRuntimeFromLines(lines: string[], config: Config): string {
   if (lines.length === 0) return ''
   return renderRuntimeBlock('最近会话（摘要）', lines, config.maxRuntimeTokens)
-}
-
-function renderSpacesFromEntries(
-  entries: Array<{ summary: string; tags: string[] }>,
-  config: Config,
-): string {
-  // 复用 renderSpaceBlock；预算不足时再整体钳制
-  return clampTokens(renderSpaceBlock(entries, config.maxSpaceTokens), config.maxSpaceTokens)
 }
 
 // 导出供测试使用的内部成员（避免测试触及私有实现细节）
