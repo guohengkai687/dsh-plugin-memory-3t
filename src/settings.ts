@@ -31,6 +31,8 @@ export interface ConfigChange {
   embedding?: boolean
   digest?: boolean
   recall?: boolean
+  /** v0.6.5：冷启动 seed 参数变更。 */
+  seed?: boolean
   budgets?: boolean
 }
 
@@ -169,6 +171,29 @@ export function applyEffective(target: Config, next: unknown): ConfigChange {
     change.recall = true
   }
 
+  // 冷启动 seed（v0.6.5；工具与 auto 开关都按引用读取，live 生效——auto 需下一次会话启动才生效）
+  const seed = groups('seed')
+  const seedEnabled = asBool(seed.enabled)
+  if (seedEnabled !== undefined && target.seed.enabled !== seedEnabled) {
+    target.seed.enabled = seedEnabled
+    change.seed = true
+  }
+  const seedAuto = asBool(seed.auto)
+  if (seedAuto !== undefined && target.seed.auto !== seedAuto) {
+    target.seed.auto = seedAuto
+    change.seed = true
+  }
+  const gitCommits = asNum(seed.gitCommits)
+  if (gitCommits !== undefined && gitCommits >= 0 && target.seed.gitCommits !== Math.floor(gitCommits)) {
+    target.seed.gitCommits = Math.floor(gitCommits)
+    change.seed = true
+  }
+  const maxEntries = asNum(seed.maxEntries)
+  if (maxEntries !== undefined && maxEntries >= 1 && target.seed.maxEntries !== Math.floor(maxEntries)) {
+    target.seed.maxEntries = Math.floor(maxEntries)
+    change.seed = true
+  }
+
   return change
 }
 
@@ -267,6 +292,13 @@ function buildSettingsSchema(z: SettingsDeps['z']): unknown {
     }),
     digest: z.object({ maxMessages: z.number() }),
     recall: z.object({ minSalience: z.number() }),
+    // v0.6.5：冷启动 seed（无 LLM 生成项目骨架）
+    seed: z.object({
+      enabled: z.boolean(),
+      auto: z.boolean(),
+      gitCommits: z.number(),
+      maxEntries: z.number(),
+    }),
     workspaceDir: z.string(),
     scope: z.string(),
     maxBootTokens: z.number(),
@@ -284,6 +316,7 @@ export const SETTINGS_SURFACE_DEFAULTS = {
   embedding: { enabled: false, endpoint: 'http://localhost:11434', model: 'nomic-embed-text', timeoutMs: 3000 },
   digest: { maxMessages: 24 },
   recall: { minSalience: 0.25 },
+  seed: { enabled: true, auto: false, gitCommits: 30, maxEntries: 40 },
   workspaceDir: '',
   scope: 'workspace',
   maxBootTokens: 600,

@@ -1,11 +1,12 @@
 /**
- * 7 个 devmemory_* 工具定义（DSH defineTool 兼容的平原对象，零 DSH 运行时依赖）。
+ * devmemory_* 工具定义（v0.6.5：12 个；DSH defineTool 兼容的平原对象，零 DSH 运行时依赖）。
  *
  * schema 用纯 JSON 谱；output 一律 object-rooted 且带 render；
  * execute 内的路径参数全部经 store 的 safeJoin 防逃逸。
  */
 
 import type { DigestEngine } from './digest.js'
+import { seedLibrary } from './seed.js'
 import type { EntryKind, Importance, MemoryStore } from './store.js'
 
 /**
@@ -460,6 +461,23 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
           return { cleared: true, totalCleared }
         }
         return s.diag.summary()
+      },
+    },
+    {
+      name: 'devmemory_seed',
+      description:
+        '冷启动 seed（v0.6.5）：记忆库为空时（会话状态块会提示"冷启动"），从仓库的**确定性信号**生成一篇项目骨架 L2 笔记——git 提交历史 / package.json / README 目录 / 顶层结构。**不调用任何 LLM**，零成本、可复现。同时返回一份"候选 L3"清单（**没有写入**：确认后才用 devmemory_remember 提升）。幂等：骨架已存在则跳过（force: true 才覆盖）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          force: { type: 'boolean', description: '骨架笔记已存在时是否覆盖重建（默认 false，幂等不覆盖）。' },
+        },
+      },
+      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      async execute(args) {
+        const s = store()
+        // config 从 store 上取（createTools 不额外接收 config，避免签名膨胀）
+        return seedLibrary(s, s.config, { force: bool(args, 'force') === true })
       },
     },
   ]

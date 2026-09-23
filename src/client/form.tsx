@@ -97,6 +97,7 @@ function groupLabel(group: string): LocaleKey {
     case 'recallNudge': return 'groupNudge'
     case 'vcs': return 'groupVcs'
     case 'embedding': return 'groupEmbedding'
+    case 'seed': return 'groupSeed'
     default: return 'groupDigestRecall'
   }
 }
@@ -272,6 +273,11 @@ export const SECTION_FIELDS: Field[] = [
   { kind: 'number', group: 'embedding', key: 'timeoutMs', label: 'embeddingTimeoutMs', min: 0, step: 100 },
   { kind: 'number', group: 'digest', key: 'maxMessages', label: 'digestMaxMessages', min: 0 },
   { kind: 'number', group: 'recall', key: 'minSalience', label: 'recallMinSalience', min: 0, step: 0.05 },
+  // v0.6.5：冷启动 seed（无 LLM 生成项目骨架）
+  { kind: 'toggle', group: 'seed', key: 'enabled', label: 'seedEnabled', hint: 'seedEnabledHint' },
+  { kind: 'toggle', group: 'seed', key: 'auto', label: 'seedAuto', hint: 'seedAutoHint' },
+  { kind: 'number', group: 'seed', key: 'gitCommits', label: 'seedGitCommits', hint: 'seedGitCommitsHint', min: 0, step: 10 },
+  { kind: 'number', group: 'seed', key: 'maxEntries', label: 'seedMaxEntries', min: 1, step: 10 },
   { kind: 'number', key: 'maxBootTokens', label: 'maxBootTokens', min: 0, step: 100 },
   { kind: 'number', key: 'maxRuntimeTokens', label: 'maxRuntimeTokens', min: 0, step: 100 },
   { kind: 'number', key: 'maxSpaceTokens', label: 'maxSpaceTokens', min: 0, step: 100 },

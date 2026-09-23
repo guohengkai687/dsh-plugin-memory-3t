@@ -64,15 +64,18 @@ test('lifecycle: apply 注册 skill/boot/工具/事件', async () => {
     const bootText = calls.contexts[0].text({ agent: undefined })
     assert.ok(bootText.includes('[dev-memory]'))
 
-    // 工具 11 个
-    assert.equal(calls.tools.length, 11)
+    // 工具 12 个（v0.6.5：+devmemory_seed）
+    assert.equal(calls.tools.length, 12)
 
-    // 事件 3 类（v0.6.4：不再监听不存在的 agent/session-start，统一走真实的 agent/created）
-    for (const event of ['agent/created', 'agent/pre-step', 'agent/turn-stopping']) {
+    // 事件 4 类（v0.6.5 勘误：agent/session-start **真实存在**，且携带 source；agent/created 为兼容边）
+    for (const event of ['agent/session-start', 'agent/created', 'agent/pre-step', 'agent/turn-stopping']) {
       assert.ok(calls.on.has(event), `缺少事件 ${event}`)
     }
-    // 回归：DSH 无 agent/session-start 事件（曾导致库根绑定/视图装载死代码、库根跑偏到进程 cwd）
-    assert.ok(!calls.on.has('agent/session-start'), '不得注册不存在的 agent/session-start')
+    // 回归：boot 块必须静态（逐请求注入但逐字节恒定），不得再携带召回的 L1/L3 内容
+    const bootWithView = calls.contexts[0].text({ agent: { id: 'whatever' } })
+    assert.ok(!bootWithView.includes('[dev-memory L1 流水]'), 'boot 块不得包含 L1 回放（v0.6.5 改为会话一次性注入）')
+    assert.ok(!bootWithView.includes('[dev-memory L3 长期事实]'), 'boot 块不得包含 L3 top-k（v0.6.5 改为会话一次性注入）')
+    assert.ok(!bootWithView.includes('[dev-memory 会话状态]'), 'boot 块不得包含易变状态块（v0.6.5 改为会话一次性注入）')
   } finally {
     process.chdir(cwd)
     await settle()
@@ -136,7 +139,7 @@ test('lifecycle: init 失败仍完成注册（fail-open）', async () => {
     await writeFile(broken, 'x')
     apply(ctx, { storageDir: broken, vcs: { enabled: false } })
     assert.equal(calls.skills.length, 1)
-    assert.equal(calls.tools.length, 11)
+    assert.equal(calls.tools.length, 12)
     // v0.6.4：workspace 自动解析不再在 apply 期急切建库 → 首个会话边（agent/created）才触达坏库根
     await calls.on.get('agent/created')({ agent: { id: 'i1' }, source: 'startup' })
     // 等异步 init 失败完成
@@ -272,10 +275,28 @@ test('lifecycle: subagent 继承父会话视图（L1 回放 / L3 top-k）', asyn
     const sub = { id: 's1', session: { header: { parentSession: 'p1' } } }
     await created({ agent: sub, source: 'resume' })
 
-    const bootText = calls.contexts[0].text({ agent: sub })
-    assert.ok(bootText.includes('种子上下文'), 'subagent boot 应继承父会话的 L3 视图: ' + bootText)
+    // v0.6.5：视图注入改由 pre-step **每会话一次**完成（boot 块已静态化，不再携带 L3 内容）
+    const preStep = calls.on.get('agent/pre-step')
+    const next = async () => ({ kind: 'enter', messages: [{ id: 'x', role: 'user', content: [{ type: 'text', text: '原始消息' }] }] })
+    const ask = (agent, id) => ({ agent, messages: [{ id, role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 })
 
-    // 无 parent 的 agent 不受影响
+    const outParent = await preStep(ask(parent, 'm1'), next)
+    assert.ok(
+      outParent.messages.some((m) => JSON.stringify(m).includes('种子上下文')),
+      '父会话首个 pre-step 应一次性注入 L3 视图',
+    )
+    // 同一会话第二次 pre-step 不得再注入（每会话一次）
+    const outParent2 = await preStep(ask(parent, 'm2'), next)
+    assert.equal(outParent2.messages.length, 1, '会话视图每会话只注入一次')
+
+    // subagent 有自己的上下文 → 继承父视图内容并自行注入一次
+    const outSub = await preStep(ask(sub, 'm3'), next)
+    assert.ok(
+      outSub.messages.some((m) => JSON.stringify(m).includes('种子上下文')),
+      'subagent 应继承父会话视图并自行注入一次',
+    )
+
+    // 无 parent 的 agent 不受影响（boot 块静态且不抛）
     const root2 = { id: 'r2' }
     await created({ agent: root2, source: 'startup' })
     assert.doesNotThrow(() => calls.contexts[0].text({ agent: root2 }))
@@ -335,5 +356,74 @@ test('lifecycle: 库根 A→B→A 切换后复用已初始化的库（v0.6.3 回
     await settle()
     await rm(wsA, rmOpts)
     await rm(wsB, rmOpts)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// v0.6.5 事件勘误回归：`agent/session-start` 真实存在（payload 含 source），与 `agent/created` 兼听
+// ---------------------------------------------------------------------------
+
+test('lifecycle: 兼听 session-start/created（幂等 + clear/compact 重装 + 视图每会话一次）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-life5-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+
+    const onSessionStart = calls.on.get('agent/session-start')
+    const onCreated = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    assert.ok(onSessionStart && onCreated, '必须同时注册两条会话启动边（v0.6.5 兼听）')
+
+    const next = async () => ({
+      kind: 'enter',
+      messages: [{ id: 'x', role: 'user', content: [{ type: 'text', text: '原始' }] }],
+    })
+    const ask = (agent, id) => ({
+      agent,
+      messages: [{ id, role: 'user', content: [{ type: 'text', text: '继续' }] }],
+      turn: 1,
+      step: 1,
+    })
+    const pluginMsgs = (out) => out.messages.filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+
+    // 1) DSH 真实顺序：created 先到（payload 无 source）→ session-start 后到（带 source）；只装载一次
+    const agent = { id: 'a1' }
+    await onCreated({ agent })
+    await onSessionStart({ agent, source: 'startup' })
+
+    // 2) 会话视图每会话只注入一次
+    const first = await preStep(ask(agent, 'm1'), next)
+    assert.equal(pluginMsgs(first).length, 1, '首个 pre-step 恰好注入一个插件消息（会话视图）')
+    assert.equal(pluginMsgs(first)[0].source.form, 'recall')
+    const again = await preStep(ask(agent, 'm2'), next)
+    assert.equal(again.messages.length, 1, '第二次 pre-step 不再注入会话视图')
+
+    // 3) source=compact（上下文被压缩，已注入内容不在上下文里）→ 重装并允许再注一次
+    await onSessionStart({ agent, source: 'compact' })
+    const afterCompact = await preStep(ask(agent, 'm3'), next)
+    assert.equal(pluginMsgs(afterCompact).length, 1, 'compact 后应重新注入一次会话视图')
+
+    // 4) 同一 source 重复发射不得重复装载/重复注入
+    await onSessionStart({ agent, source: 'resume' })
+    const afterDup = await preStep(ask(agent, 'm4'), next)
+    assert.equal(afterDup.messages.length, 1, '已处理过的 source 不应再注入')
+
+    // 5) clear 同样触发重装
+    await onSessionStart({ agent, source: 'clear' })
+    const afterClear = await preStep(ask(agent, 'm5'), next)
+    assert.equal(pluginMsgs(afterClear).length, 1, 'clear 后应重新注入一次会话视图')
+
+    // 6) 只有 agent/created 的形态（无 session-start）也必须能工作
+    const agent2 = { id: 'a2' }
+    await onCreated({ agent: agent2 })
+    const onlyCreated = await preStep(ask(agent2, 'm6'), next)
+    assert.equal(pluginMsgs(onlyCreated).length, 1, '仅 created 时也应注入会话视图')
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
   }
 })

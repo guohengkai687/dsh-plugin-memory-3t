@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-memory-3t",
-  "version": "0.6.4",
-  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实，git 版本回溯 + Ollama 向量检索（可选）+ pack/unpack 迁移 + 只读 WebUI 面板 + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 工作区根按会话真实工作区解析 + 诊断与异常记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5，WebUI 与参数可在设置里管理、live 生效；v0.5.3 起参数唯一编辑面为独立页、删除插件配置选项卡内的重复卡片，v0.5.4 独立页移除状态卡成为纯参数面，v0.5.5 修复表单组首字段重复渲染——分组标题条目不再携带字段，每个参数只渲染一次）；v0.6.0 插件更名 dsh-plugin-memory-3t——目录/包名/注册名/设置插槽 id/client bundle 标识/安装命令与文档全量同步；v0.6.1 修复索引长期陈旧导致召回恒为空：脏标记持久化 index.json.dirty 跨进程生效、阈值重建死代码修复、索引键改 docKey（修向量融合键匹配）、schemaVersion 升 2 旧快照判废、空召回自愈 + status 暴露 indexStale；v0.6.2 修复 devmemory_status 未暴露索引陈旧字段（白名单构造漏映射）并在启动块加索引陈旧告警，v0.6.3 修复 ensureStore 库根 A→B→A 切换时新建实例跳过 init 导致 git 版本回溯静默失效（改为按库根缓存实例、复访复用，回归测试覆盖），v0.6.4 修复库根跑偏到进程 cwd 的根因——误监听不存在的 agent/session-start 导致会话工作区绑定/视图装载/digest 补做全部死代码（改为接真实的 agent/created 边绑定库根+装载视图+subagent 继承，pre-step/turn-stopping 按 payload.agent 会话 cwd 绑定，workspace 自动解析不再在 apply 期按进程 cwd 急切建库），纯本地零硬依赖（BM25/digest/dev-memory skill；设置桥按需动态加载 dsh-settings）",
+  "version": "0.6.5",
+  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实，git 版本回溯 + Ollama 向量检索（可选）+ pack/unpack 迁移 + 只读 WebUI 面板 + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 工作区根按会话真实工作区解析 + 诊断与异常记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5，WebUI 与参数可在设置里管理、live 生效；v0.5.3 起参数唯一编辑面为独立页、删除插件配置选项卡内的重复卡片，v0.5.4 独立页移除状态卡成为纯参数面，v0.5.5 修复表单组首字段重复渲染——分组标题条目不再携带字段，每个参数只渲染一次）；v0.6.0 插件更名 dsh-plugin-memory-3t——目录/包名/注册名/设置插槽 id/client bundle 标识/安装命令与文档全量同步；v0.6.1 修复索引长期陈旧导致召回恒为空：脏标记持久化 index.json.dirty 跨进程生效、阈值重建死代码修复、索引键改 docKey（修向量融合键匹配）、schemaVersion 升 2 旧快照判废、空召回自愈 + status 暴露 indexStale；v0.6.2 修复 devmemory_status 未暴露索引陈旧字段（白名单构造漏映射）并在启动块加索引陈旧告警，v0.6.3 修复 ensureStore 库根 A→B→A 切换时新建实例跳过 init 导致 git 版本回溯静默失效（改为按库根缓存实例、复访复用，回归测试覆盖），v0.6.4 修复库根跑偏到进程 cwd 的根因——误监听不存在的 agent/session-start 导致会话工作区绑定/视图装载/digest 补做全部死代码（改为接真实的 agent/created 边绑定库根+装载视图+subagent 继承，pre-step/turn-stopping 按 payload.agent 会话 cwd 绑定，workspace 自动解析不再在 apply 期按进程 cwd 急切建库），纯本地零硬依赖（BM25/digest/dev-memory skill；设置桥按需动态加载 dsh-settings）；v0.6.5 事件勘误（agent/session-start 真实存在——dsh 0.1.5-rc.2 的 cordis Events 声明 + agent-loop 真实发射 + scope 分发表，payload {agent,source}；agent/created 无 source；改为兼听两条边 + 幂等守卫，并用 source 在 clear/compact 时重装会话视图并补注一次）+ 注入时机重构（boot 块静态化：逐请求注入但逐字节恒定、不破坏 prefix 缓存；会话状态块 + L1 回放 + L3 top-k 由「每请求重复（最多约 2600 tokens/轮）」改为「每会话首次 pre-step 只注入一次」）+ 三态可用性（ok/empty/unavailable：故障≠空库）+ 库根来源写入守卫（会话内解析不到真实工作区时拒绝写入、保留读取）+ 无 LLM 冷启动 seed（新工具 devmemory_seed：git 历史/package.json/README/顶层结构 → L2 项目骨架 + 候选 L3，不自动写 L3，幂等，seed.enabled/auto/gitCommits/maxEntries 可配）+ 零依赖 MCP stdio 面（新 bin dev-memory-mcp：手写 JSON-RPC 2.0，无 @modelcontextprotocol/sdk，tools/list+call 复用同一套 devmemory_* 工具）",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +14,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "dev-memory-pack": "./bin/dev-memory-pack.mjs"
+    "dev-memory-pack": "./bin/dev-memory-pack.mjs",
+    "dev-memory-mcp": "./bin/dev-memory-mcp.mjs"
   },
   "files": [
     "dist",

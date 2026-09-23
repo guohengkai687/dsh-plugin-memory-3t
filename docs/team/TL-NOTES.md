@@ -53,10 +53,10 @@ pre-step handler 修改决策（`lifecycle.ts` line ~328）：`return { kind: 'e
 
 ## 3. 生命周期事件 payload（参考 mnemon contracts + agent-loop）
 
-- ~~`agent/session-start`~~（**v0.6.4 勘误：DSH 无此事件**，勿再使用）——会话边实为 `agent/created`：`{ agent, source: 'startup'|'resume'|'clear'|'compact', signal? }`
+- **`agent/session-start`（v0.6.5 勘误：DSH **确实存在**此事件，v0.6.4 的"无此事件"判定是错的）**：`{ agent, source: 'startup'|'resume'|'clear'|'compact' }`，`@mode emit`，紧随 `agent/created` 发射（`dsh-agent-loop`：`emitAgentEvent(loopCtx, agent, "agent/session-start", { source })`）。**`source` 只在这里有**。
+- `agent/created`：`{ agent }`（**payload 只有 agent，没有 source**——v0.6.4 曾误记为 `{agent, source, signal?}`）
 - `agent/pre-step`（waterfall）：`{ agent, messages: HostUserMessage[], turn, step, signal }`（mnemon 接口定义；DSH agent-loop `lib/index.js` line 501 处 waterfall dispatch）
 - `agent/turn-stopping`（serial）：`{ agent, turn, signal }`
-- `agent/created`：`{ agent, source, signal? }`（DSH agent runtime-types；source 同上）
 - `agent.followup(input)`：agent-loop line 396 存在
 
 ## 4. Skill 注册（dsh-skill）
@@ -210,7 +210,7 @@ ctx.systemPrompt.context({
 - 维护 `viewBySession: Map<sessionId, AgentView>`（v0.6.4 起在 `agent/created` 装载/继承后登记）；
   `agent/created` 取 `agent.session.header.parentSession`，命中则把父视图复制给子 agent（v0.6.4 起库根绑定/视图装载/subagent 继承统一在 agent/created 处理）
   （`reminded` 独立计数归零）。根会话（无 parent）登记为追忆候选。
-- 细节（v0.6.4 勘误）：DSH 无 `agent/session-start`，子 agent 的 `agent/created` 直接继承父视图（父视图已由父的 agent/created 装载完成）；继承的价值在避免子 agent boot 无 L1/L3 注入。
+- 细节（v0.6.5 勘误）：DSH **有** `agent/session-start`（v0.6.4 判定有误）。子 agent 继承父视图内容，但 `injected` 置 false——subagent 有自己的上下文，需要自己那份"每会话一次"注入。
 
 ### 10.4 restore 整库时间片（`src/vcs.ts` / `src/tools.ts`）
 

@@ -22,17 +22,29 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 # 3. 重启 DSH 会话。记忆库默认建在会话工作区的 .memory/ 目录
 ```
 
-安装后不需要任何手工初始化：首次会话自动建库，模型通过 11 个 `devmemory_*` 工具与 `dev-memory` skill 使用记忆。
+安装后不需要任何手工初始化：首次会话自动建库，模型通过 12 个 `devmemory_*` 工具与 `dev-memory` skill 使用记忆。
 
 ## 三层记忆模型
 
 | 层 | 目录 | 内容 | 注入方式 | 预算 |
 |---|---|---|---|---|
-| L1 Runtime | `runtime/YYYY-MM-DD.md` | 当日会话流水 | 会话启动注入近期摘要 | ≤ 1200 tokens |
+| L1 Runtime | `runtime/YYYY-MM-DD.md` | 当日会话流水 | **每会话一次**注入近期摘要 | ≤ 1200 tokens |
 | L2 Documents | `docs/**/*.md` | 知识笔记（教程/方案/排查） | **不注入**，`devmemory_recall` 按需查 | 0 |
-| L3 Spaces | `spaces/<id>.md` | 原子事实（偏好/决策/实体/上下文） | 会话启动 top-k + pre-step 提醒 | ≤ 800 tokens |
+| L3 Spaces | `spaces/<id>.md` | 原子事实（偏好/决策/实体/上下文） | **每会话一次**注入 top-k + pre-step 提醒 | ≤ 800 tokens |
 
 分层原则：L2 是"检索层"，完整文档永不主动进 prompt；L1/L3 是"注入层"，各自有 token 硬顶，超预算宁可少注入也不破坏 markdown 结构。
+
+### 注入时机（v0.6.5 重构：从"每请求"改为"每会话一次"）
+
+| 内容 | v0.6.4 及以前 | v0.6.5 起 |
+|---|---|---|
+| 协议声明（数据非指令、工具指引、库根） | `systemPrompt.context`，**每次请求**注入，且携带易变状态 | `systemPrompt.context`，**每次请求**注入但**逐字节静态**（不破坏 prefix 缓存） |
+| 会话状态（条目数/VCS/检索/索引陈旧/诊断计数） | 混在上述块里，每次请求重复 | **每会话一次**注入（`[dev-memory 会话状态]`） |
+| L1 回放 + L3 top-k | 混在上述块里，每次请求重复 | **每会话一次**注入（`[dev-memory L1 流水]` / `[dev-memory L3 长期事实]`） |
+
+**为什么改**：DSH 的 `systemPrompt.context` 贡献会被渲染进 "Current runtime context" 快照，而该快照**在每次请求重新组装**（原文：`This snapshot supersedes earlier runtime-context snapshots`）。于是原来最多约 2600 tokens 的易变内容会在**每一轮**重新计费，历史里还会堆积 N 份互相 supersede 的旧快照，且块内易变值让 prefix 缓存每轮失效。
+
+**改动后**：每次请求只剩约 250 tokens 的静态协议块；召回内容作为**一条插件消息**在会话首个 pre-step 注入一次后即成为正常历史（与 Hindsight「会话首个 prompt 仅一次」同构）。`clear` / `compact` 会重置注入（见上「事件勘误」），中途要更新状态用 `devmemory_status`。
 
 ## 工具
 
@@ -49,6 +61,7 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 | `devmemory_diff` | 变更明细（某次提交或未提交变更，文件级增删行） |
 | `devmemory_restore` | 恢复到指定提交（dry-run 先行 + 检查点 + 可撤销的撤销；targets 省略 = 整库时间片） |
 | `devmemory_diag` | 诊断与异常记录汇总（v0.4）：summary 统计 / list 明细 / clear 清空 |
+| `devmemory_seed` | 冷启动 seed（v0.6.5）：库为空时从仓库确定性信号（git 历史 / package.json / README / 顶层结构）生成项目骨架 L2 + 候选 L3 清单，**无 LLM** |
 
 > v0.4 起每个工具的执行都会被自动埋点：**调用异常**与**不符合预期的行为**（工具报错、降级路径、生命周期失败等）自动记入 `<库>/diag/events.jsonl`，`devmemory_diag` / `devmemory_status` / WebUI 面板可查看，使用一段时间后审查这批记录用于优化插件。
 
@@ -91,6 +104,10 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 | `diag.enabled` | true | 诊断与异常记录开关（v0.4）：记录调用异常与不符合预期的行为到 `<库>/diag/events.jsonl` |
 | `diag.maxEvents` | 2000 | 诊断事件保留上限（0 = 不限）；超过 2 倍上限自动压缩，只保留最新 maxEvents 条 |
 | `webui.enabled` | true | 只读 WebUI 面板开关（v0.5）：false 时摘除 `/dev-memory` 路由（设置页可实时切换） |
+| `seed.enabled` | true | 冷启动 seed 开关（v0.6.5）：true 时允许 `devmemory_seed`（只读仓库 + 写一篇 L2 骨架） |
+| `seed.auto` | false | 会话启动时若库为空则自动 seed 一次（v0.6.5）：置 true 即复刻 Hindsight 的"零配置开箱"；默认关 = 写库是显式动作，由 skill 引导模型按需调用 |
+| `seed.gitCommits` | 30 | seed 读取最近多少条 git 提交（0 = 不读 git） |
+| `seed.maxEntries` | 40 | seed 顶层目录条目上限（大仓库防膨胀） |
 
 配置方式：cordis.patch.yml 里 insert 的 `config` 块，或 DSH settings 覆盖同名字段；v0.5 起推荐在 **DSH 设置 →「记忆管理」** 页可视化管理（见下）。
 
@@ -200,10 +217,25 @@ workspace 根 = config.workspaceDir（非空，显式固定）
 - headless（无会话或会话无 header.cwd）保持旧行为（进程 cwd 基准），完全向后兼容。
 - 需要把库钉死在某个目录（如多工作区共存同一库）用 `workspaceDir` 绝对路径。
 
-> **v0.6.4 修复（库根跑偏根因）**：v0.6.3 及以前误监听**不存在的** `agent/session-start` 事件（DSH 权威事件目录只有 `agent/created` / `agent/pre-step` / `agent/turn-stopping` 等，均注入 `agent`），导致"按会话工作区解析"从未真正执行——库根被钉在插件 apply 时的进程 cwd（web 服务 cwd 非工作区时，记忆全部写入"跑偏"的空库）。v0.6.4 改为：
-> 1. 会话启动边改用真实的 `agent/created`（source=startup/resume/clear/compact）：绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；
-> 2. `agent/pre-step` / `agent/turn-stopping` 按 `payload.agent` 的会话 cwd 复绑库根（多工作区并存、插件热重载后首个步骤也不串库）；
-> 3. `workspace` 自动解析不再在 apply 期按进程 cwd 急切建库（`workspaceDir` 钉死 / `scope:user` 仍立即绑定）。
+> ### ⚠ 事件勘误（v0.6.5）：`agent/session-start` **确实存在**
+>
+> v0.6.4 曾把"库根跑偏"的根因判定为「DSH 不存在 `agent/session-start`，误监听不存在的边导致死代码」。**这个论断是错的**，v0.6.5 已核实并纠正（本地 DSH `0.1.5-rc.2` 源码）：
+>
+> | 证据 | 位置 |
+> |---|---|
+> | cordis `Events` 显式声明 `'agent/session-start'(payload: { agent, source: SessionStartSource })`，`@mode emit` | `dsh-agent/lib/types/runtime-types.d.ts` |
+> | 真实发射：`emitAgentEvent(loopCtx, agent, "agent/session-start", { source })`，紧随 `agents.announce(agent)`（即 `agent/created`）之后 | `dsh-agent-loop/lib/index.js` |
+> | scope 分发表含 `"agent/session-start"`（agent 作用域分发） | `dsh-scope/lib/invariant.js` |
+> | `SessionStartSource = 'startup' \| 'resume' \| 'clear' \| 'compact'` | `dsh-agent/lib/types/*.d.ts` |
+>
+> 而 **`agent/created` 的 payload 只有 `{ agent }`，没有 `source`**（source 只属于 `session-start`）。
+>
+> **结论与处置**：
+> 1. 绑 `agent/created` 功能上仍可行（同一 agent、相邻发射），所以 v0.6.4 **确实修好了**库根跑偏——但真正起作用的是同批改动里的「**`workspace` 自动解析不再在 apply 期按进程 cwd 急切建库**」+「`pre-step`/`turn-stopping` 按 `payload.agent` 复绑」，而不是"事件不存在"。
+> 2. v0.6.5 起**两者兼听**（同一 handler + 幂等守卫，任一版本只发其中一条也能工作），并真正用上 `source`：`clear` / `compact` 时上下文已被重置或压缩 → **重装会话视图并允许再补注一次**（Hindsight 只注一次、压缩后只能靠模型自己调 reflect 找回；我们用 `source` 把这一步自动化）。
+> 3. 绑定 `agent/created` 时记为"临时"，随后 `session-start` 到达只**升级记录真实 source**（不重复装载视图/补做/补交），并落一条 diag，便于在真实环境核对 DSH 各版本的事件语义。
+>
+> **v0.6.4 修复（保留，仍有效）**：v0.6.3 及以前按 `process.cwd()` 建库（web 服务 cwd 非会话工作区时，记忆全部写入"跑偏"的空库）。v0.6.4 的三条改动：①会话启动边绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；②`agent/pre-step` / `agent/turn-stopping` 按 `payload.agent` 的会话 cwd 复绑库根（多工作区并存、插件热重载后首个步骤也不串库）；③`workspace` 自动解析不再在 apply 期按进程 cwd 急切建库（`workspaceDir` 钉死 / `scope:user` 仍立即绑定）。
 
 ## 诊断与异常记录（v0.4）
 
@@ -224,6 +256,62 @@ workspace 根 = config.workspaceDir（非空，显式固定）
 - 记录**不入 git 历史**（库内 `.gitignore` 忽略 `diag/`）、**不随 pack 迁移**（可重建的操作数据）；`maxEvents` 默认 2000 条，超过 2 倍上限自动压缩只保留最新。
 - 防敏感：工具参数摘要截断（字符串参数 ≤ 60 字符），不会把完整记忆内容整段落盘。
 - 使用场景：插件用久了之后，先 `clear` 开一个干净观察窗，用一段，再 `summary`/`list` 看"哪个工具最容易出错、哪些降级路径高频出现"，据此优化插件或调整配置。
+
+## 冷启动 seed（v0.6.5）
+
+新工作区的记忆库是空的——这是本插件相对 Hindsight 最大的能力缺口（Hindsight 会用 git 历史 + LLM codebase survey 自动建库）。v0.6.5 补上了**无 LLM 版**：
+
+```
+模型：devmemory_seed              # 库为空（会话状态块提示"冷启动"）时生成项目骨架
+模型：devmemory_seed(force=true)  # 覆盖重建已有骨架
+```
+
+- **只读确定性信号**：git 提交历史（最近 `seed.gitCommits` 条）/ `package.json`（名称·说明·scripts）/ README（首行 + 1–3 级标题）/ 顶层目录与文件（剔除 `node_modules`/`dist`/`.git` 等噪声与隐藏项）。**零依赖、零成本、同输入同输出**。
+- **产出**：`<库>/docs/project/overview.md`（L2 检索层：按需 `devmemory_recall`，**不**注入 prompt）。
+- **纪律：不自动写 L3。** Hindsight 用 LLM 自动抽取入长期记忆（语义更强，也更容易把推断当事实写进去）；我们只产出**候选 L3 清单**随工具结果返回，**确认后**才由模型 `devmemory_remember` 提升。这是有意的分歧点：L3 只放已确认的事实。
+- **幂等**：骨架已存在则不覆盖（`force: true` 才重建），避免冲掉后续人工补充的内容。
+- **自动模式**：`seed.auto: true` 时，会话启动发现库为 `empty` 就自动 seed 一次（复刻 Hindsight 的零配置体验）；默认 **false**，因为我们坚持"写库是显式动作"，由 skill 在空库时引导模型调用。
+- 全程 fail-open：git 不可用 / 无 README / 无 package.json 只记入结果的 `skipped`，不影响其余信号。
+
+## 三态可用性与写入守卫（v0.6.5）
+
+**三态可用性**（`availability`）——把"空库"和"库坏了"分开，避免降级被误读成"没有记忆"：
+
+| 状态 | 含义 | 行为 |
+|---|---|---|
+| `ok` | 有内容 | 正常 |
+| `empty` | 已初始化但为空 | 正常（提示可 `devmemory_seed` 冷启动） |
+| `unavailable` | 初始化/读取失败（**降级**） | boot 块**每请求**附一行告警 + 会话状态块显式说明"本轮未注入记忆，读到的'没有相关内容'不代表历史里没有" + diag 记 `error` |
+
+（对照 Hindsight 的"冷库/热库/服务不可达"三态判定：单一布尔会把"服务抖动"当成"已建库"从而永久静默跳过建库。我们用三态避免反向的错误——把故障当成空库。）
+
+**库根来源守卫**——`scope: workspace` 且既没有 `workspaceDir` 固定、又拿不到 `session.header.cwd` 时，库根只能是"进程 cwd 推导"的**不可信来源**（v0.6.3 库根跑偏正是这样发生的）：
+
+- **拒绝写入**（`devmemory_remember`/`note`/`link`/`forget` 及内部流水写入全部被拒，并给出可读错误 + diag `unexpected`）；
+- **读取与检索不受影响**（fail-open：仍然不打断会话）；
+- 解除方式：设置 `workspaceDir` 钉死库位，或改用 `scope: user`。
+- 形状上对应 Hindsight 的 `HINDSIGHT_MCP_HARNESS` 缺失即**拒绝启动**（"错误答案会污染数据，宁可拒绝"）——我们拒绝的是写，不是启动，因为我们的读路径不会污染数据。
+
+
+
+## MCP stdio 面（v0.6.5，跨 agent 可移植）
+
+`devmemory_*` 工具同时以 **MCP（Model Context Protocol）stdio server** 暴露，任何支持 MCP 的编码 agent（Claude Code / Codex / Cursor / …）都能直接使用**同一份本地记忆库**——补齐了对照 Hindsight（18 种 agent + MCP）最大的可移植性缺口。
+
+```bash
+dev-memory-mcp --root D:/my/repo                    # 随插件安装的 bin
+DEV_MEMORY_ROOT=D:/my/repo dev-memory-mcp --storage-dir .memory --scope workspace
+```
+
+- **手写 JSON-RPC 2.0，零依赖**：**刻意不引入 `@modelcontextprotocol/sdk`**（那正是 Hindsight 的依赖之一），以保住"零运行时依赖"这一核心定位。
+- **方法**：`initialize`（回显客户端 `protocolVersion`，缺省 `2025-06-18`；`capabilities.tools` + `serverInfo` + `instructions`）、`ping`、`notifications/initialized`（静默、不应答）、`tools/list`（`{name, description, inputSchema}`，一律 object-rooted）、`tools/call`（`{content:[{type:'text',text}], isError}`）。
+- **错误语义分界（有意区分两层）**：协议层失败 → JSON-RPC `error`（未知方法 `-32601` / 参数或工具名非法 `-32602` / 内部错误 `-32603` / 坏行若能恢复出 id 则 `-32700`，否则忽略并写 stderr，**进程不死**）；**工具业务失败 → JSON-RPC `result` + `isError: true`**（MCP 惯例：工具错误是模型可见的数据，不是协议故障）。
+- **配置**：`--root` / `DEV_MEMORY_ROOT`（默认 cwd）、`--storage-dir` / `DEV_MEMORY_STORAGE_DIR`（默认 `.memory`）、`--scope workspace|user`、`--no-vcs`、`--vcs-branch`、`--embedding`、`-h/--help`；`--flag=value` 与 `--flag value` 都支持；退出码 0/1/2。
+- **stdout 只走协议**（日志与诊断一律 stderr）；换行分隔 JSON、请求串行处理；stdin EOF → 排空队列 → `flushVcs` → 退出 0。
+- **与 DSH 面同源**：复用同一 `MemoryStore` + `createTools`，工具文本由各工具自己的 `output.render` 产出，因此两个面输出逐字节一致。
+- **边界**：MCP 面没有 DSH 会话，故库根必须由 `--root`（或 `DEV_MEMORY_ROOT`）**显式给出**——这正是"库根来源守卫"在会话面要求的同一件事，在 MCP 面变成了必填参数。会话视图注入、pre-step 提醒、WebUI/设置页等 DSH 专属能力不在 MCP 面（MCP 只暴露工具）。
+- 测试：`test/mcp.test.mjs` 以**真实管道** spawn 服务器跑 8 个集成用例（initialize / tools.list / 只读 call / remember→recall 往返 / `-32601` 与坏行存活 / 通知不应答 / env 与 flag 解析 / 业务失败 `isError` 与未知工具 `-32602`）。
+  > ⚠ 沙箱提示：该用例需要"允许管道 stdio spawn 子进程"的环境。在 DSH 文件沙箱（read-only / workspace-write）下 `child_process.spawn` 抓管道会 `EPERM`（已文档化的沙箱边界），此时这 8 例会失败而**非**代码缺陷；在普通 shell/CI 下全绿。
 
 ## 迁移（pack/unpack，v0.2）
 
@@ -296,7 +384,8 @@ npm test              # build + node --test（Windows 沙箱下用 --test-isolat
 - ✅ v0.5.4 完成：独立页纯参数面——移除页面顶部「记忆库状态」卡（状态行与表单开关主题重合造成"参数重复"观感），库状态回归只读面板 `/dev-memory/`；设置页只剩打开面板入口 + 参数表单，client bundle 再缩至 19.6kB
 - ✅ v0.5.5 完成（参数重复真正根因）：`form.tsx` 渲染循环把分组标题条目与组内首个字段一起 push，导致每个分组的第一个参数渲染两次（v0.5.0 引入，前述"状态卡/卡片"皆为表面现象）；修复为标题条目只含 header、字段行单独渲染，每个参数只出现一次
 - ✅ v0.6.0 完成（插件更名）：`dsh-dev-memory-3t` → **`dsh-plugin-memory-3t`**——目录与 git 仓库、package.json 包名、插件注册名（`src/index.ts` `name`）、设置 `settings.section` 插槽 id（`PLUGIN_ID`）、client bundle 标识、`cordis.patch.yml` id/name、安装命令与全部文档（README/DESIGN/team）同步更名；测试断言同步（`source.plugin`）；版本升至 0.6.0 打包归档 `.memtest-pack` 并重装 headless/web 两 profile（旧归档 `dsh-dev-memory-3t-0.*.tgz` 保留为历史产物）
-- ✅ v0.6.4 完成（库根跑偏根因修复）：误监听不存在的 `agent/session-start` 事件 → 会话工作区绑定/视图装载/digest 补做全部死代码，库根被钉在插件 apply 时的进程 cwd（web 服务 cwd 非工作区即"跑偏"）。改为接真实 `agent/created` 边（startup/resume/clear/compact，payload 注入 `agent`）绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；`pre-step`/`turn-stopping` 按 `payload.agent` 会话 cwd 复绑（多工作区不串库）；workspace 自动解析不再在 apply 期按进程 cwd 急切建库。回归：事件清单不含 session-start、多工作区交错 pre-step 落各自库根（见「工作区根解析」节）
+- ✅ v0.6.4 完成（库根跑偏修复；**根因判定于 v0.6.5 被纠正，见上「事件勘误」**）：v0.6.3 及以前按 `process.cwd()` 建库（web 服务 cwd 非工作区即"跑偏"）。三条改动**确实有效**：①会话启动边绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；②`pre-step`/`turn-stopping` 按 `payload.agent` 会话 cwd 复绑（多工作区不串库）；③`workspace` 自动解析不再在 apply 期按进程 cwd 急切建库。⚠ 但当时把根因写成"DSH 无 `agent/session-start`"是**错的**，随之写下的"事件清单不含 session-start"回归断言也是错的（v0.6.5 已改为断言**必须注册**）
+- ✅ v0.6.5 完成（事件勘误 + 注入时机重构 + 三项借鉴）：**①事件勘误**——`agent/session-start` 真实存在（payload `{agent, source}`，`agent/created` 无 `source`），v0.6.4 的"不存在"论断纠正，改为**兼听两条边**（幂等 + created→session-start 的 source 升级记录）并用 `source` 处理 `clear`/`compact` 的重装补注；**②注入时机重构**——boot 块静态化（逐请求但逐字节恒定、不破坏 prefix 缓存），会话状态与 L1/L3 召回改为**每会话一次**注入（原为每请求重复，最多约 2600 tokens/轮）；**③三态可用性**（`ok`/`empty`/`unavailable`，故障 ≠ 空库）；**④库根来源守卫**（会话内无法解析真实工作区时拒绝写入、保留读取）；**⑤冷启动 seed**（`devmemory_seed`，无 LLM 从 git/README/manifest/目录生成 L2 骨架 + 候选 L3，不自动写 L3）；**⑥零依赖 MCP stdio 面**（`dev-memory-mcp`，手写 JSON-RPC，无 `@modelcontextprotocol/sdk`）
 - v0.6（候选）：多库并存切换（named libraries）、recall 结果缓存与面板历史、scope 迁移工具（workspace→user 搬家）
 
 ## License

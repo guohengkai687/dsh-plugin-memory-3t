@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { DEFAULT_CONFIG } from '../dist/config.js'
 import { DiagLog } from '../dist/diag.js'
 import { DigestEngine } from '../dist/digest.js'
-import { renderBootBlock } from '../dist/render.js'
+import { renderBootBlock, renderStatusBlock } from '../dist/render.js'
 import { MemoryStore } from '../dist/store.js'
 import { createTools } from '../dist/tools.js'
 
@@ -256,7 +256,7 @@ test('diag 集成: store.init 建 diag 目录；工具异常自动入记 + usage
   }
 })
 
-test('diag 集成: boot 块仅在存在记录时附诊断提示行', () => {
+test('diag 集成: 会话状态块仅在存在记录时附诊断提示行（boot 块恒不带诊断）', () => {
   const base = {
     ready: true,
     root: '/x/.memory',
@@ -267,11 +267,16 @@ test('diag 集成: boot 块仅在存在记录时附诊断提示行', () => {
     vcs: { enabled: true, available: true, ready: true, branch: 'main', commits: 3, pendingWrites: 0 },
     embedding: { enabled: false, ready: false, degraded: false, model: 'nomic-embed-text', vectorCount: 0 },
   }
-  const withDiag = renderBootBlock({ ...base, diag: { enabled: true, total: 3, error: 1, unexpected: 2 } }, 2000)
+  // v0.6.5：诊断计数属易变状态 → 只出现在每会话一次的 status 块里
+  const withDiag = renderStatusBlock({ ...base, diag: { enabled: true, total: 3, error: 1, unexpected: 2 } }, 2000)
   assert.ok(withDiag.includes('devmemory_diag'))
   assert.ok(withDiag.includes('诊断'))
-  const withoutDiag = renderBootBlock(base, 2000)
+  const withoutDiag = renderStatusBlock(base, 2000)
   assert.ok(!withoutDiag.includes('devmemory_diag'))
+  // 回归：boot 块（逐请求注入）必须静态，任何状态下都不得出现诊断计数
+  const boot = renderBootBlock({ ...base, diag: { enabled: true, total: 3, error: 1, unexpected: 2 } }, 2000)
+  assert.ok(!boot.includes('devmemory_diag'))
+  assert.ok(!boot.includes('累计'))
 })
 
 test('diag: updateConfig 运行时切换（v0.5 设置页 live）', async () => {

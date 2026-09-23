@@ -65,6 +65,27 @@ export interface WebUiConfig {
   enabled: boolean
 }
 
+/**
+ * 冷启动 seed 配置（v0.6.5，借鉴 Hindsight 的"冷仓库自动建库"）。
+ *
+ * **无 LLM**：只读仓库里的确定性信号（git 提交历史 / package.json / README 标题 / 顶层目录），
+ * 生成一篇 L2 项目骨架笔记 + 一份"候选 L3"清单。**不自动写 L3**——L3 是可信层，
+ * 只接受模型或用户确认过的事实（候选清单交给模型决定是否 devmemory_remember）。
+ */
+export interface SeedConfig {
+  /** 允许 devmemory_seed 工具（默认 true；纯读取仓库 + 写一篇 L2，无外部依赖）。 */
+  enabled: boolean
+  /**
+   * 会话启动时若库为空则自动 seed 一次（默认 **false**：写库是显式动作，由 skill 引导模型按需调用；
+   * 设为 true 即复刻 Hindsight 的"零配置开箱"行为）。
+   */
+  auto: boolean
+  /** 读取最近多少条 git 提交（默认 30；0 = 不读 git）。 */
+  gitCommits: number
+  /** 顶层目录条目上限（默认 40，避免大仓库把骨架撑爆）。 */
+  maxEntries: number
+}
+
 export interface VcsConfig {
   /** 版本回溯开关；false 时完全跳过 git（等同 v0.1 行为）。 */
   enabled: boolean
@@ -114,6 +135,8 @@ export interface Config {
   diag: DiagConfig
   /** 只读 WebUI 面板（v0.5 新增开关）：false 时摘除 /dev-memory 路由。 */
   webui: WebUiConfig
+  /** 冷启动 seed（v0.6.5）：无 LLM 地从仓库确定性信号生成项目骨架 L2。 */
+  seed: SeedConfig
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -139,6 +162,9 @@ export const DEFAULT_CONFIG: Config = {
   },
   diag: { enabled: true, maxEvents: 2000 },
   webui: { enabled: true },
+  // v0.6.5：auto 默认 false——写库是显式动作（由 skill 引导模型在空库时调用 devmemory_seed）；
+  // 想复刻 Hindsight 的零配置开箱行为，把它设为 true。
+  seed: { enabled: true, auto: false, gitCommits: 30, maxEntries: 40 },
 }
 
 function clampNonNegative(value: unknown, fallback: number): number {
@@ -162,6 +188,7 @@ export function mergeConfig(partial: unknown): Config {
   const vcsIdentity = (vcs.identity ?? {}) as Record<string, unknown>
   const diag = (p.diag ?? {}) as Record<string, unknown>
   const webui = (p.webui ?? {}) as Record<string, unknown>
+  const seed = (p.seed ?? {}) as Record<string, unknown>
   const defaultIdentity = DEFAULT_CONFIG.vcs.identity
   const branch = typeof vcs.branch === 'string' && /^[a-zA-Z0-9._/-]+$/.test(vcs.branch.trim()) ? vcs.branch.trim() : DEFAULT_CONFIG.vcs.branch
   const vcsOut: VcsConfig = {
@@ -212,5 +239,12 @@ export function mergeConfig(partial: unknown): Config {
       maxEvents: Math.max(0, Math.floor(clampNonNegative(diag.maxEvents, DEFAULT_CONFIG.diag.maxEvents))),
     },
     webui: { enabled: webui.enabled !== false },
+    // v0.6.5：auto 默认 false（显式写库），gitCommits=0 可关掉 git 读取
+    seed: {
+      enabled: seed.enabled !== false,
+      auto: seed.auto === true,
+      gitCommits: Math.floor(clampNonNegative(seed.gitCommits, DEFAULT_CONFIG.seed.gitCommits)),
+      maxEntries: Math.max(1, Math.floor(clampNonNegative(seed.maxEntries, DEFAULT_CONFIG.seed.maxEntries))),
+    },
   }
 }

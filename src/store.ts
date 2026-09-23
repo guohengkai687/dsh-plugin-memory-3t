@@ -82,6 +82,13 @@ export interface StoreStatusSnapshot {
   /** v0.6.1：快照文档数与库内实际是否不一致（陈旧/超前）。 */
   indexStale: boolean
   firstRun: boolean
+  /**
+   * v0.6.5 三态可用性：`ok`（有内容）/ `empty`（已初始化但为空，可冷启动 seed）/
+   * `unavailable`（初始化或读取失败，**降级**——语义与"空库"相反，不可混淆）。
+   */
+  availability: 'ok' | 'empty' | 'unavailable'
+  /** 不可用原因（availability === 'unavailable' 时有值）。 */
+  unavailableReason?: string
   /** git 版本回溯状态（v0.2）。git 不可用时自动降级。 */
   vcs: VcsStatus
   /** 向量检索状态（v0.2）。Ollama 不可用时自动降级回 BM25。 */
@@ -129,6 +136,12 @@ function entrySummary(body: string): string {
 
 export class MemoryStore {
   readonly root: string
+  /**
+   * 会话工作区根（v0.6.5）：冷启动 seed 读仓库信号（git/README/package.json/目录）要用它。
+   * 注意 scope:user 时它是会话工作区，而 `root` 是全局库根——两者不同，不可混用。
+   * （命名带 session 前缀以区别于下面的私有方法 `workspaceRoot()`——后者是从库根反推工作区。）
+   */
+  readonly sessionWorkspaceRoot: string
   private readonly dirs: ReturnType<typeof layerDirs>
   readonly index: IndexManager
   /** git 版本回溯管理层（v0.2）。 */
@@ -140,12 +153,72 @@ export class MemoryStore {
   private meta: MetaFile | null = null
   private vcsDegradedWarned = false
   private embeddingWarned = false
+  /** v0.6.5：库不可用原因（null = 未发生故障）；三态可用性的唯一真相源。 */
+  private unavailable: string | null = null
+
+  /** v0.6.5：当前不可用原因（null = 可用）。供 boot 块/status 判定"降级"而非"空库"。 */
+  get unavailableReason(): string | null {
+    return this.unavailable
+  }
+
+  /**
+   * v0.6.5：标记本库为"不可用"（初始化/读取失败）。**幂等**（保留首个原因，后续不覆盖）。
+   * 与"空库"严格区分：空库是正常状态（可 seed），不可用是降级（应显式告警且不假装有记忆）。
+   */
+  markUnavailable(reason: string): void {
+    if (this.unavailable !== null) return
+    this.unavailable = reason
+    void this.diag
+      .record({ level: 'error', origin: 'init', message: `记忆库不可用（降级）：${reason}` })
+      .catch(() => undefined)
+  }
+
+  // ---------------------------------------------------------------- 写入守卫（v0.6.5）
+
+  private writeGuard: string | null = null
+  private writeGuardWarned = false
+
+  /**
+   * v0.6.5：库根来源守卫——库根**不是**由会话真实工作区解析出来时（既无 `workspaceDir` 固定、
+   * 又拿不到 `session.header.cwd`），禁止一切写入。
+   *
+   * 动机：v0.6.3 及以前的"库根跑偏"故障根因正是"按进程 cwd 建库"——若在会话里无法解析真实
+   * 工作区，却仍按 `process.cwd()` 建出一个库并写入，记忆就会静默落到错误位置（读也读不到）。
+   * Hindsight 的对应做法是 `HINDSIGHT_MCP_HARNESS` 缺失时**拒绝启动**（"错误答案会污染数据，
+   * 宁可拒绝"）。我们的等价物：**拒绝写入**（读与注入不受影响，仍 fail-open 不打断会话）。
+   *
+   * 解除方式：配置 `workspaceDir` 钉死库位，或改用 `scope: user`（基准为用户主目录，稳定）。
+   */
+  setWriteGuard(reason: string | null): void {
+    this.writeGuard = reason
+    if (reason !== null && !this.writeGuardWarned) {
+      this.writeGuardWarned = true
+      void this.diag
+        .record({ level: 'unexpected', origin: 'session', message: `写入守卫生效（拒绝写入）: ${reason}` })
+        .catch(() => undefined)
+    }
+  }
+
+  /** 当前写入守卫原因（null = 允许写入）。 */
+  get writeGuardReason(): string | null {
+    return this.writeGuard
+  }
+
+  /** 写入前守卫：被守卫时抛业务错误（工具层会把它作为可读错误返回，不会污染库）。 */
+  private assertWritable(): void {
+    if (this.writeGuard === null) return
+    throw new Error(
+      `记忆写入被拒绝：${this.writeGuard}。为避免把记忆写进错误的位置，本次写入未执行；` +
+        '请设置 workspaceDir 钉死库位，或改用 scope: user。读取与检索不受影响。',
+    )
+  }
 
   constructor(
     workspaceRoot: string,
     public readonly config: Config,
   ) {
     this.root = resolveRoot(workspaceRoot, config.storageDir, config.scope)
+    this.sessionWorkspaceRoot = workspaceRoot
     this.dirs = layerDirs(this.root)
     this.index = new IndexManager(safeJoin(this.root, 'index.json'), config.index.rebuildAfterWrites)
     this.vcs = new GitVcs(this.root, config.vcs)
@@ -156,9 +229,15 @@ export class MemoryStore {
   // ---------------------------------------------------------------- 初始化
 
   async init(): Promise<void> {
-    await mkdir(this.dirs.runtime, { recursive: true, mode: 0o700 })
-    await mkdir(this.dirs.docs, { recursive: true, mode: 0o700 })
-    await mkdir(this.dirs.spaces, { recursive: true, mode: 0o700 })
+    try {
+      await mkdir(this.dirs.runtime, { recursive: true, mode: 0o700 })
+      await mkdir(this.dirs.docs, { recursive: true, mode: 0o700 })
+      await mkdir(this.dirs.spaces, { recursive: true, mode: 0o700 })
+    } catch (error) {
+      // v0.6.5：目录都建不出来 → 明确的"不可用"（而非空库）；记诊断后仍然抛出，调用方 fail-open
+      this.markUnavailable(`记忆库目录创建失败: ${error instanceof Error ? error.message : String(error)}`)
+      throw error
+    }
     if (this.meta === null) await this.loadMeta()
     try {
       await appendFile(safeJoin(this.root, 'audit.jsonl'), '', { flag: 'a', mode: 0o600 })
@@ -314,6 +393,7 @@ export class MemoryStore {
    * @returns 新条目（含生成的 id）。
    */
   async remember(input: { kind: EntryKind; content: string; tags?: string[]; importance?: Importance }): Promise<SpaceEntry> {
+    this.assertWritable()
     const kind = input.kind
     const now = new Date()
     const id = makeEntryId(kind, now)
@@ -386,6 +466,7 @@ export class MemoryStore {
   }
 
   async updateEntry(id: string, patch: Partial<Omit<SpaceEntry, 'id'>>): Promise<SpaceEntry | null> {
+    this.assertWritable()
     const entry = await this.readEntry(id)
     if (entry === null) return null
     const next: SpaceEntry = {
@@ -406,6 +487,7 @@ export class MemoryStore {
    * @param mode - delete 删除文件；demote 仅 salience 减半。
    */
   async removeEntry(id: string, mode: 'delete' | 'demote', reason = ''): Promise<boolean> {
+    this.assertWritable()
     const path = safeJoin(this.dirs.spaces, `${id}.md`)
     if (mode === 'demote') {
       const entry = await this.readEntry(id)
@@ -430,6 +512,7 @@ export class MemoryStore {
 
   /** 双向建立链接；任一 id 不存在则抛业务错误（拒绝孤儿链接）。 */
   async linkEntries(a: string, b: string): Promise<{ a: SpaceEntry; b: SpaceEntry }> {
+    this.assertWritable()
     const ea = await this.readEntry(a)
     const eb = await this.readEntry(b)
     if (ea === null || eb === null) {
@@ -487,6 +570,7 @@ export class MemoryStore {
   // ---------------------------------------------------------------- L1 runtime
 
   async appendRuntime(date: Date, line: string): Promise<void> {
+    this.assertWritable()
     const fileName = runtimeFileName(date)
     const path = safeJoin(this.dirs.runtime, fileName)
     if (/^#\s+\d{4}-\d{2}-\d{2}/.test(line)) {
@@ -528,6 +612,7 @@ export class MemoryStore {
 
   /** 把流水压缩为摘要版（保留数据行 + digest 摘要段）。 */
   async compactRuntime(date: Date, digestSummary: string[]): Promise<void> {
+    this.assertWritable()
     const fileName = runtimeFileName(date)
     const path = safeJoin(this.dirs.runtime, fileName)
     const raw = await this.readRuntime(date)
@@ -548,6 +633,7 @@ export class MemoryStore {
    * 写/追加 L2 笔记。relPath 必须为相对路径（允许子目录），禁绝对路径与 `..`。
    */
   async note(input: { relPath: string; body: string; append?: boolean }): Promise<{ path: string; absolute: string }> {
+    this.assertWritable()
     let relPath = input.relPath.replace(/\\/g, '/').replace(/^\/+/, '')
     if (relPath.includes(':') || relPath.startsWith('/')) {
       throw new Error('devmemory_note: relPath 必须为记忆库内相对路径')
@@ -876,6 +962,7 @@ export class MemoryStore {
       /* ignore */
     }
     const snap = await this.index.snapshotDocCount()
+    const empty = l3 === 0 && l2 === 0 && l1 === 0
     return {
       ready: true,
       root: this.root,
@@ -885,7 +972,10 @@ export class MemoryStore {
       indexDirty: this.index.dirtyCount,
       indexDocCount: snap,
       indexStale: snap === null ? l1 + l2 + l3 > 0 : snap !== l1 + l2 + l3,
-      firstRun: l3 === 0 && l2 === 0 && l1 === 0,
+      firstRun: empty,
+      // v0.6.5 三态：不可用（降级）> 空库（正常，可 seed）> ok
+      availability: this.unavailable !== null ? 'unavailable' : empty ? 'empty' : 'ok',
+      ...(this.unavailable !== null ? { unavailableReason: this.unavailable } : {}),
       vcs: await this.vcs.status(),
       embedding: await this.embeddingStatus(),
       diag: await this.diag.counters(),

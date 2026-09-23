@@ -1,14 +1,25 @@
 /**
  * dsh-plugin-memory-3t 插件入口：机制层接线。
  *
- * - 生命周期：agent/created（DSH 真实"会话启动/恢复"边）绑定库根 + 装载视图 /
- *   pre-step 记录消息 + 引导提醒 / turn-stopping digest 沉淀 /
- *   created 兼 subagent 视图继承（v0.1 简化为共享视图）
- * - 工作区根（v0.3.1/v0.6.4）：按会话真实工作区 agent.session.header.cwd 解析，不再假设进程 cwd；
- *   回退链 workspaceDir 固定 > 会话工作区根 > process.cwd()（headless/旧形态）
- *   （v0.6.4 修复：此前误监听不存在的 agent/session-start 事件，会话语义的事件从未发射，
- *   库根绑定/视图装载从未执行 → 库根被钉在 apply 时的进程 cwd，落到"跑偏"空库。）
- * - system-prompt：dev-memory-boot context（order -200，函数式读取 per-agent 视图）
+ * - 生命周期（v0.6.5 勘误）：DSH **确实存在** `agent/session-start` 事件——
+ *   `dsh-agent/lib/types/runtime-types.d.ts` 的 cordis Events 显式声明
+ *   `'agent/session-start'(payload: { agent, source: SessionStartSource })`（@mode emit），
+ *   `dsh-agent-loop` 在 `announce(agent)`（即 `agent/created`）之后真实发射，且
+ *   `dsh-scope` 的 scope 分发表含它；`SessionStartSource = 'startup'|'resume'|'clear'|'compact'`。
+ *   v0.6.4 曾判定"该事件不存在、误监听导致死代码"——**该论断有误**（详见 README「事件勘误」）。
+ *   绑 `agent/created` 功能上可行（同 agent、相邻发射，故当时确实修好了库根跑偏——真正的修复
+ *   是"不再在 apply 期按进程 cwd 急切建库"），但**丢失了 `source` 语义**（agent/created 的
+ *   payload 只有 `{agent}`，没有 source）。
+ *   v0.6.5 起**两者兼听**（同一 handler + 幂等守卫，任一边存在都能工作），并用 source 处理
+ *   `clear`/`compact`（上下文被重置/压缩 → 已注入的会话视图已不在上下文里，需重装并允许再注一次）。
+ * - 工作区根（v0.3.1）：按会话真实工作区 agent.session.header.cwd 解析，不再假设进程 cwd；
+ *   回退链 workspaceDir 固定 > 会话工作区根 > process.cwd()（headless/旧形态）。
+ * - system-prompt：dev-memory-boot context（order -200，**静态文本**：逐请求注入但逐字节恒定，
+ *   不携带任何易变状态，故不破坏 prefix 缓存）。
+ * - 注入时机（v0.6.5 重构）：召回内容（状态块 + L1 回放 + L3 top-k）改为**每会话首次 pre-step
+ *   只注入一次**（对照 Hindsight「会话首个 prompt 仅一次」）。原因：DSH 的 systemPrompt.context
+ *   会被渲染进每请求重新组装的 "Current runtime context" 快照，携带易变/大块内容等于
+ *   每轮重复计费 + 历史堆积互相 supersede 的旧快照。
  * - skills：内嵌 dev-memory 协议
  * - tools：11 个 devmemory_* 工具（含 v0.4 新增 devmemory_diag 诊断汇总）
  * - diag（v0.4）：工具调用异常 / 生命周期失败 / 降级路径自动记入 <库>/diag/events.jsonl，
@@ -27,7 +38,8 @@ import { resolve } from 'node:path'
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
-import { renderBootBlock, type StoreStatus } from './render.js'
+import { renderBootBlock, renderStatusBlock, type StoreStatus } from './render.js'
+import { seedLibrary } from './seed.js'
 import { resolveRoot } from './paths.js'
 import { loadMemorySkillContent, MEMORY_SKILL_DESCRIPTION, MEMORY_SKILL_INVOCATION, MEMORY_SKILL_NAME, MEMORY_SKILL_WHEN_TO_USE } from './skill.js'
 import { MemoryStore } from './store.js'
@@ -55,9 +67,13 @@ export const name = 'dsh-plugin-memory-3t'
 export const inject = ['systemPrompt', 'skills', 'tools']
 
 interface AgentView {
+  /** 易变状态块（v0.6.5：原在 boot 块里逐请求注入，现随本视图一次性注入）。 */
+  status: string
   runtime: string
   spaces: string
   reminded: number
+  /** v0.6.5：会话视图是否已一次性注入过（每会话一次，clear/compact 后重置）。 */
+  injected: boolean
 }
 
 interface SessionMessage {
@@ -162,17 +178,38 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
    * 只有 headless 工具路径与 apply 期显式钉死（workspaceDir）/ user 全局库，
    * 否则会按进程 cwd 建出"跑偏"的空库。
    */
-  const ensureStore = (sessionCwd?: string): { store: MemoryStore; engine: DigestEngine } => {
-    if (active !== null && sessionCwd === undefined) return active
+  const ensureStore = (
+    sessionCwd?: string,
+    opts?: { sessionContext?: boolean },
+  ): { store: MemoryStore; engine: DigestEngine } => {
+    const fromSession = opts?.sessionContext === true
+    if (active !== null && sessionCwd === undefined && !fromSession) return active
+    // v0.6.5 库根来源守卫：会话里解析不到真实工作区根时，本库根只能是"进程 cwd 推导"的不可信来源
+    // （v0.6.3 的库根跑偏正是这样发生的）→ 拒绝写入，但保留读取/注入（fail-open 不打断会话）。
+    const unresolvedSession =
+      fromSession && pinnedWorkspace === null && config.scope === 'workspace' && (sessionCwd ?? '').trim() === ''
+    const guardReason = unresolvedSession
+      ? '当前会话未提供真实工作区根（session.header.cwd 缺失），本库根由进程 cwd 推导、来源不可信'
+      : null
+    // 已绑定会话库且本次无法解析工作区 → 沿用现有库并加守卫，绝不按进程 cwd 切库
+    if (guardReason !== null && active !== null) {
+      active.store.setWriteGuard(guardReason)
+      return active
+    }
     const workspaceRoot = pinnedWorkspace ?? sessionCwd ?? process.cwd()
     const root = resolveRoot(workspaceRoot, config.storageDir, config.scope)
-    if (active !== null && active.root === root) return active
+    if (active !== null && active.root === root) {
+      if (guardReason !== null) active.store.setWriteGuard(guardReason)
+      return active
+    }
     const cached = storeCache.get(root)
     if (cached !== undefined) {
+      if (guardReason !== null) cached.store.setWriteGuard(guardReason)
       active = { store: cached.store, engine: cached.engine, root }
       return active
     }
     const store = new MemoryStore(workspaceRoot, config)
+    if (guardReason !== null) store.setWriteGuard(guardReason)
     const engine = new DigestEngine(store)
     storeCache.set(root, { store, engine })
     active = { store, engine, root }
@@ -183,9 +220,17 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
         ctx.logger.info?.('[dev-memory] 记忆库就绪: ' + store.root)
       })
       .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error)
+        // v0.6.5：显式标记"库不可用"（≠ 空库）；markUnavailable 内部记一条 error 诊断，
+        // 故此处直接走 logger，避免与 warn() 的诊断埋点重复。
+        store.markUnavailable(`初始化失败: ${message}`)
         if (!initWarned) {
           initWarned = true
-          warn(`[dev-memory] 记忆库初始化失败（已降级为不注入记忆）: ${error instanceof Error ? error.message : String(error)}`)
+          try {
+            ctx.logger.warn(`[dev-memory] 记忆库初始化失败（已降级为不注入记忆）: ${message}`)
+          } catch {
+            /* logger 不可用时静默 */
+          }
         }
       })
     return active
@@ -235,62 +280,114 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
 
   // ------------------------------------------------------------ boot context
 
+  /** boot 用的库状态：优先最近一次 status()，未就绪时给中性占位（不误报"不可用"）。 */
+  const bootStatus = (): StoreStatus => {
+    if (cachedStatus !== null) return cachedStatus
+    // v0.6.5：尚未跑到 status() 但库已明确标记不可用时，也要让 boot 块显式告警（降级 ≠ 空库）
+    const reason = active?.store.unavailableReason ?? null
+    return {
+      ready: false,
+      root: active?.store.root ?? '(未初始化)',
+      scope: config.scope,
+      counts: { l1: 0, l2: 0, l3: 0 },
+      lastDigestAt: null,
+      indexDirty: 0,
+      firstRun: true,
+      ...(reason !== null ? { availability: 'unavailable' as const, unavailableReason: reason } : {}),
+      vcs: {
+        enabled: config.vcs.enabled,
+        available: false,
+        ready: false,
+        branch: null,
+        commits: 0,
+        pendingWrites: active?.store.vcs.pendingWrites ?? 0,
+      },
+      embedding: {
+        enabled: config.embedding.enabled,
+        ready: false,
+        degraded: config.embedding.enabled,
+        model: config.embedding.model,
+        vectorCount: 0,
+      },
+      diag: { enabled: config.diag.enabled, total: 0, error: 0, unexpected: 0 },
+    }
+  }
+
+  // v0.6.5：本 context 只放**静态**协议文本（逐请求注入，但逐字节恒定 → 不破坏 prefix 缓存）。
+  // 召回内容（状态块 / L1 回放 / L3 top-k）不再从这里出去，见 pre-step 的每会话一次性注入。
   ctx.systemPrompt.context({
     name: 'dev-memory-boot',
     order: -200,
-    text: (assembleContext?: unknown) => {
-      const agent = isObject(assembleContext) ? assembleContext.agent : undefined
-      const view = isObject(agent) ? agentViews.get(agent) : undefined
-      const status: StoreStatus = cachedStatus ?? {
-        ready: false,
-        root: active?.store.root ?? '(未初始化)',
-        scope: config.scope,
-        counts: { l1: 0, l2: 0, l3: 0 },
-        lastDigestAt: null,
-        indexDirty: 0,
-        firstRun: true,
-        vcs: {
-          enabled: config.vcs.enabled,
-          available: false,
-          ready: false,
-          branch: null,
-          commits: 0,
-          pendingWrites: active?.store.vcs.pendingWrites ?? 0,
-        },
-        embedding: {
-          enabled: config.embedding.enabled,
-          ready: false,
-          degraded: config.embedding.enabled,
-          model: config.embedding.model,
-          vectorCount: 0,
-        },
-        diag: { enabled: config.diag.enabled, total: 0, error: 0, unexpected: 0 },
-      }
-      const parts = [renderBootBlock(status, config.maxBootTokens)]
-      if (view !== undefined && view.runtime !== '') parts.push(view.runtime)
-      if (view !== undefined && view.spaces !== '') parts.push(view.spaces)
-      return parts.join('\n\n')
-    },
+    text: () => renderBootBlock(bootStatus(), config.maxBootTokens),
   })
 
   // ------------------------------------------------------------ 生命周期
 
-  // agent/created（v0.6.4）：DSH 真实的"会话启动/恢复"边——每次 agent 上线都触发
-  // （source: startup=服务启动恢复 / resume / clear / compact，payload 注入 agent）。
-  // 修复背景：v0.6.3 及以前误监听不存在的 `agent/session-start`，该路径从未执行，
-  // 库根绑定 / 视图装载 / digest 补做 / 补交全部失效：库根在 apply 时按进程 cwd 钉死，
-  // web 进程 cwd 非会话工作区 → 记忆写入"跑偏"的空库（本次在 FlexOne014_master 会话发现的 bug）。
-  // 现在每次 agent/created：按会话真实工作区绑定记忆库、根会话装载 L1 回放 + L3 top-k、
-  // subagent 继承父会话视图、补做未完成 digest、补交未提交写入（fail-open，不阻塞后续步骤）。
-  ctx.on('agent/created', async (payload: unknown) => {
-    const agent = isObject(payload) ? payload.agent : undefined
-    if (!isObject(agent)) return
+  // ------------------------------------------------------------ 会话启动边（v0.6.5：兼听两条边 + 幂等守卫）
+  //
+  // 勘误（v0.6.4 → v0.6.5）：`agent/session-start` **真实存在**。证据（DSH 0.1.5-rc.2 本地源码）：
+  //   1. dsh-agent/lib/types/runtime-types.d.ts 的 cordis `Events` 显式声明
+  //      'agent/session-start'(payload: { agent, source: SessionStartSource })，@mode emit；
+  //   2. dsh-agent-loop 在 loopCtx.agents.announce(agent)（即 agent/created）之后真实发射
+  //      emitAgentEvent(loopCtx, agent, "agent/session-start", { source })；
+  //   3. dsh-scope/lib/invariant.js 的 scope 分发表含 "agent/session-start"。
+  //   而 `agent/created` 的 payload 只有 { agent }——**source 只属于 session-start**。
+  // 因此 v0.6.4 的"事件不存在→死代码"论断有误；真正治好库根跑偏的是同批改动里的
+  // "workspace 自动解析不再在 apply 期按进程 cwd 急切建库" + 按 payload.agent 复绑。
+  //
+  // 兼听策略（确定性，不依赖事件发射顺序或定时器）：
+  //   - 先到 agent/created → 记为"临时(created)"并执行全量会话启动；
+  //   - 随后 agent/session-start 到达 → 只**升级记录**真实 source（不重复装载视图/补做/补交）；
+  //   - source = clear/compact → 视为上下文被重置/压缩：此前注入的会话视图已不在上下文里，
+  //     **重装视图并允许再注一次**（Hindsight 只注一次，压缩后只能靠模型自己调 reflect 找回；
+  //     我们用 source 把这一步自动化）；
+  //   - 若某版本只发其中一条边，另一条缺失也不影响（幂等守卫保证只跑一次）。
+  const startedSources = new WeakMap<object, string>()
+
+  const handleSessionStart = async (agent: object, source: string, eventName: string): Promise<void> => {
+    const last = startedSources.get(agent)
+    const provisional = last === 'created'
+    const rerun = source === 'clear' || source === 'compact'
+    // 已处理过 且 不是 clear/compact 重装 且 不是 created→真实 source 的升级 → 跳过
+    if (last !== undefined && !rerun && !(provisional && source !== 'created')) return
+    startedSources.set(agent, source)
+    const upgradeOnly = provisional && !rerun
+    if (upgradeOnly) {
+      // created 先到、session-start 后到：只补记真实 source（这是核对 DSH 事件语义的现场证据）
+      try {
+        const { store } = ensureStore(sessionCwdOf(agent), { sessionContext: true })
+        void store.diag
+          .record({
+            level: 'unexpected',
+            origin: 'session',
+            message: `会话启动边升级：agent/created → agent/session-start（source=${source || 'unknown'}）`,
+          })
+          .catch(() => undefined)
+      } catch {
+        /* 诊断记不上不影响会话 */
+      }
+      return
+    }
     try {
       const sessionId = sessionIdOf(agent)
       const parent = parentSessionOf(agent)
       const previous = agentViews.get(agent)
       // 1) 按会话真实工作区绑定库根（subagent 通常同工作区 → 命中 storeCache 实例，开销可忽略）
-      const { store, engine } = ensureStore(sessionCwdOf(agent))
+      const { store, engine } = ensureStore(sessionCwdOf(agent), { sessionContext: true })
+      // 1.5) v0.6.5：冷启动 seed（**默认关**）。开启后库为空即自动生成项目骨架，
+      //      复刻 Hindsight 的"零配置开箱即有记忆"；默认关是因为我们坚持"写库是显式动作"
+      //      （由 skill 引导模型在空库时调用 devmemory_seed）。fail-open，写不了只记诊断。
+      if (config.seed.enabled && config.seed.auto) {
+        try {
+          const pre = await store.status()
+          if (pre.availability === 'empty') {
+            const seeded = await seedLibrary(store, config)
+            if (seeded.written) ctx.logger.info?.(`[dev-memory] 冷启动 seed 已生成骨架: ${seeded.relPath}`)
+          }
+        } catch (error) {
+          warn(`[dev-memory] 冷启动 seed 失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       // 2) 视图：根会话（无父会话或父视图缺失）装载；subagent 继承父会话视图
       if (parent === undefined || !viewBySession.has(parent)) {
         const view = await loadSessionView(store, config, previous)
@@ -300,12 +397,21 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
       } else {
         const inherited = viewBySession.get(parent)
         if (inherited !== undefined) {
-          const view = { ...inherited, reminded: 0 }
+          // 继承父视图内容，但 injected 置 false：subagent 有自己的上下文，需要自己那份一次注入
+          const view = { ...inherited, reminded: 0, injected: false }
           agentViews.set(agent, view)
           if (sessionId !== '') viewBySession.set(sessionId, view)
         }
       }
       cachedStatus = await store.status()
+      // 2.5) v0.6.5：现场记录实际走到的边与 source（供核对 DSH 版本行为；clear/compact 重装也可见）
+      void store.diag
+        .record({
+          level: 'unexpected',
+          origin: 'session',
+          message: `会话启动边=${eventName} source=${source || 'unknown'}（视图${rerun ? '重装' : '装载'}）`,
+        })
+        .catch(() => undefined)
       // 3) digest 补做：上次 pending 且 retries 未超限
       if (store.digestState.pending) {
         try {
@@ -325,27 +431,59 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
       // 5) webServer 可能晚于插件 apply 才就绪 → 首次会话补一次面板挂载
       ensurePanel()
     } catch (error) {
-      // DSH 的 agent/created 是 serial 且 listener 抛错会回滚 attach → 必须 fail-open，绝不向运行时抛错
+      // DSH 的会话启动边是 serial 且 listener 抛错会回滚 attach → 必须 fail-open，绝不向运行时抛错
       warn(`[dev-memory] 会话视图装载失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  // agent/session-start（DSH 规范会话启动边，携带 source）
+  ctx.on('agent/session-start', async (payload: unknown) => {
+    const agent = isObject(payload) ? payload.agent : undefined
+    if (!isObject(agent)) return
+    const source = payload !== null && typeof (payload as Record<string, unknown>).source === 'string'
+      ? ((payload as Record<string, unknown>).source as string)
+      : ''
+    await handleSessionStart(agent, source, 'agent/session-start')
   })
 
-  // pre-step（waterfall）：记录 user 消息 + 引导提醒（预算内；消息不可变时仅 boot 引导）
+  // agent/created（兼容边；payload 只有 {agent}，无 source）
+  ctx.on('agent/created', async (payload: unknown) => {
+    const agent = isObject(payload) ? payload.agent : undefined
+    if (!isObject(agent)) return
+    await handleSessionStart(agent, 'created', 'agent/created')
+  })
+
+  // pre-step（waterfall）：记录 user 消息 + **每会话一次**的会话视图注入 + 引导提醒
   ctx.on('agent/pre-step', async (payload: unknown, next: () => Promise<unknown>) => {
     const stepAgent = isObject(payload) ? payload.agent : undefined
     try {
       // v0.6.4：按 payload.agent 的真实工作区绑定（多工作区并存、或插件热重载后首个步骤，都能落到正确库根）
-      recordMessages(payload, sessionBuffer, ensureStore(sessionCwdOf(stepAgent)).store)
+      recordMessages(payload, sessionBuffer, ensureStore(sessionCwdOf(stepAgent), { sessionContext: true }).store)
     } catch {
       /* 流水记录失败不影响步骤 */
     }
+    // v0.6.5：召回内容（状态块 + L1 回放 + L3 top-k）**每会话只注入一次**。
+    // 机会式触发：视图就绪后的首个 pre-step 注入（不依赖会话启动边与首个 pre-step 的时序）。
+    const viewText = takeSessionViewInjection(stepAgent, agentViews)
     const reminder = computeReminder(payload, agentViews)
-    if (reminder === null) return next()
+    if (viewText === null && reminder === null) return next()
     try {
       const base = await next()
       if (!isObject(base) || !Array.isArray(base.messages)) return base
-      const injected = createPluginMessage(reminder.text, 'instructions', 'Optional memory recall reminder')
-      return { ...base, messages: [...base.messages, injected] }
+      const extra: Record<string, unknown>[] = []
+      if (viewText !== null) {
+        extra.push(
+          createPluginMessage(
+            viewText,
+            'recall',
+            'Session memory view (status + L1 replay + L3 top-k), injected once per session',
+          ),
+        )
+      }
+      if (reminder !== null) {
+        extra.push(createPluginMessage(reminder.text, 'instructions', 'Optional memory recall reminder'))
+      }
+      return { ...base, messages: [...base.messages, ...extra] }
     } catch (error) {
       warn(`[dev-memory] pre-step 注入失败（跳过注入）: ${error instanceof Error ? error.message : String(error)}`)
       return next()
@@ -356,7 +494,7 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   ctx.on('agent/turn-stopping', async (payload: unknown) => {
     // v0.6.4：turn-stopping 的 payload 同样注入 agent → 按会话真实工作区绑定，digest/提交落到正确库
     const turnAgent = isObject(payload) ? payload.agent : undefined
-    const { store, engine } = ensureStore(sessionCwdOf(turnAgent))
+    const { store, engine } = ensureStore(sessionCwdOf(turnAgent), { sessionContext: true })
     try {
       const summaries = await engine.maybeDigest({ key: 'root', messages: sessionBuffer })
       if (summaries !== null && summaries.length > 0) {
@@ -548,10 +686,29 @@ async function loadSessionView(
     .slice(0, 5)
   const spaces = top.map((e) => ({ summary: e.summary, tags: e.tags }))
   return {
+    // v0.6.5：易变状态块与会话视图一起**只注入一次**（原在 boot 块里逐请求注入）
+    status: renderStatusBlock(status, config.maxBootTokens),
     runtime: renderRuntimeFromLines(runtimeLines, config),
     spaces: renderSpacesFromEntries(spaces, config),
     reminded: previous?.reminded ?? 0,
+    // 每次会话启动（含 clear/compact 重装）都重置为未注入，交给 pre-step 做一次性注入
+    injected: false,
   }
+}
+
+/**
+ * 取出并消费"每会话一次"的会话视图注入文本（v0.6.5）。
+ * 视图未就绪（会话启动尚未装载）/ 已注入过 / 无内容 → null。
+ * 消费语义：一旦注入就置 `injected = true`，此后本会话不再重复注入
+ * （clear/compact 时 loadSessionView 会重置该标记，从而实现"压缩后补注一次"）。
+ */
+function takeSessionViewInjection(agent: unknown, views: WeakMap<object, AgentView>): string | null {
+  if (!isObject(agent)) return null
+  const view = views.get(agent)
+  if (view === undefined || view.injected) return null
+  view.injected = true
+  const parts = [view.status, view.runtime, view.spaces].filter((part) => part !== '')
+  return parts.length > 0 ? parts.join('\n\n') : null
 }
 
 import { renderRuntimeBlock, renderSpaceBlock, clampTokens } from './render.js'

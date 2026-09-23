@@ -8,16 +8,16 @@ import { MemoryStore } from '../dist/store.js'
 import { DigestEngine } from '../dist/digest.js'
 import { DEFAULT_CONFIG } from '../dist/config.js'
 
-const TOOL_NAMES = ['devmemory_status', 'devmemory_recall', 'devmemory_remember', 'devmemory_note', 'devmemory_link', 'devmemory_forget', 'devmemory_consolidate', 'devmemory_history', 'devmemory_diff', 'devmemory_restore', 'devmemory_diag']
+const TOOL_NAMES = ['devmemory_status', 'devmemory_recall', 'devmemory_remember', 'devmemory_note', 'devmemory_link', 'devmemory_forget', 'devmemory_consolidate', 'devmemory_history', 'devmemory_diff', 'devmemory_restore', 'devmemory_diag', 'devmemory_seed']
 const NAME_RE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/
 
-test('tools: 11 个工具齐全且命名合法', async () => {
+test('tools: 12 个工具齐全且命名合法', async () => {
   const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools-'))
   try {
     const store = new MemoryStore(ws, DEFAULT_CONFIG)
     await store.init()
     const tools = createTools(store, new DigestEngine(store))
-    assert.equal(tools.length, 11)
+    assert.equal(tools.length, 12)
     assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort())
     for (const tool of tools) assert.match(tool.name, NAME_RE)
   } finally {

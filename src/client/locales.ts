@@ -35,6 +35,14 @@ export type LocaleKey =
   | 'digestMaxMessages'
   | 'recallMinSalience'
   | 'groupBudgets'
+  | 'groupSeed'
+  | 'seedEnabled'
+  | 'seedEnabledHint'
+  | 'seedAuto'
+  | 'seedAutoHint'
+  | 'seedGitCommits'
+  | 'seedGitCommitsHint'
+  | 'seedMaxEntries'
   | 'maxBootTokens'
   | 'maxRuntimeTokens'
   | 'maxSpaceTokens'
@@ -83,6 +91,14 @@ export const zh: LocaleDict = {
   groupDigestRecall: 'digest / recall 细调',
   digestMaxMessages: 'digest 触发消息数',
   recallMinSalience: '注入 top-k 最低 salience',
+  groupSeed: '冷启动 seed（项目骨架）',
+  seedEnabled: '启用 devmemory_seed 工具',
+  seedEnabledHint: '库为空时由模型调用，从 git 历史 / package.json / README / 顶层结构生成项目骨架（无 LLM、零成本）。',
+  seedAuto: '库为空时自动 seed 一次',
+  seedAutoHint: '开启即复刻 Hindsight 的"零配置开箱"；默认关——写库是显式动作，由 skill 引导模型按需调用。下一次会话启动生效。',
+  seedGitCommits: '读取提交条数',
+  seedGitCommitsHint: 'seed 读最近多少条 git 提交（0 = 不读 git）。',
+  seedMaxEntries: '顶层条目上限',
   groupBudgets: '注入预算（字符）',
   maxBootTokens: 'boot 块',
   maxRuntimeTokens: '运行时流水',
@@ -131,6 +147,16 @@ export const en: LocaleDict = {
   groupDigestRecall: 'Digest / recall tuning',
   digestMaxMessages: 'Messages before digest',
   recallMinSalience: 'Min salience for boot top-k',
+  groupSeed: 'Cold-start seed (project skeleton)',
+  seedEnabled: 'Enable the devmemory_seed tool',
+  seedEnabledHint:
+    'Lets the model generate a project skeleton from git history / package.json / README / top-level layout. No LLM, zero cost.',
+  seedAuto: 'Auto-seed when the library is empty',
+  seedAutoHint:
+    'Turn on to mimic Hindsight’s zero-setup behaviour. Off by default — writing is explicit, driven by the skill. Takes effect on the next session start.',
+  seedGitCommits: 'Commits to read',
+  seedGitCommitsHint: 'How many recent git commits seed reads (0 = skip git).',
+  seedMaxEntries: 'Top-level entry cap',
   groupBudgets: 'Injection budget (chars)',
   maxBootTokens: 'Boot block',
   maxRuntimeTokens: 'Runtime stream',
