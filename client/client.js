@@ -504,6 +504,33 @@ window.__ModuleLoader__.load({
 				hint: "maxViewTokensHint",
 				min: 0,
 				step: 100
+			},
+			{
+				kind: "number",
+				key: "l1MaxCharsPerLine",
+				label: "l1MaxCharsPerLine",
+				hint: "l1MaxCharsPerLineHint",
+				min: 0,
+				step: 20
+			},
+			{
+				kind: "toggle",
+				key: "subagentInject",
+				label: "subagentInject",
+				hint: "subagentInjectHint"
+			},
+			{
+				kind: "select",
+				key: "toolsProfile",
+				label: "toolsProfile",
+				hint: "toolsProfileHint",
+				options: [{
+					value: "core",
+					label: "toolsProfileCore"
+				}, {
+					value: "full",
+					label: "toolsProfileFull"
+				}]
 			}
 		];
 		//#endregion
@@ -611,6 +638,14 @@ window.__ModuleLoader__.load({
 			maxSpaceTokens: "L3 空间",
 			maxViewTokens: "会话视图总量",
 			maxViewTokensHint: "状态块 + L1 回放 + L3 三块合计上限，按序扣减（防止前一块挤光后面）。",
+			l1MaxCharsPerLine: "L1 单行摘要字数",
+			l1MaxCharsPerLineHint: "流水行是提问原文，超长按此字数截断（0 = 不摘要）。注入只保留\"哪天问过什么\"。",
+			subagentInject: "子代理也注入视图",
+			subagentInjectHint: "默认关：子代理保留记忆工具但不自动注入状态块/流水/提醒（扇出场景实测零使用）。",
+			toolsProfile: "工具暴露面",
+			toolsProfileHint: "core = 5 个高频工具 + 1 个 action 式 admin（省约 1.2k tokens/次调用）；full = v0.6 的 12 个独立工具。改动需重启插件生效。",
+			toolsProfileCore: "精简（推荐）",
+			toolsProfileFull: "完整（12 工具）",
 			restartNote: "工作区根 / 库粒度（scope / workspaceDir / storageDir）在设置页暂不提供修改，属启动期绑定，需编辑配置文件后重启。",
 			save: "保存",
 			saving: "保存中…",
@@ -673,6 +708,14 @@ window.__ModuleLoader__.load({
 			maxSpaceTokens: "L3 space",
 			maxViewTokens: "Session view total",
 			maxViewTokensHint: "Combined cap for status + L1 replay + L3, deducted in order (no block can starve the rest).",
+			l1MaxCharsPerLine: "L1 line summary length",
+			l1MaxCharsPerLineHint: "Stream lines are raw prompts; longer ones are cut at this many chars (0 = no summary).",
+			subagentInject: "Inject view into subagents",
+			subagentInjectHint: "Off by default: subagents keep the memory tools but get no auto-injected status/stream/reminder.",
+			toolsProfile: "Tool surface",
+			toolsProfileHint: "core = 5 hot tools + one action-style admin (saves ~1.2k tokens per call); full = the 12 separate tools. Restart the plugin to apply.",
+			toolsProfileCore: "Core (recommended)",
+			toolsProfileFull: "Full (12 tools)",
 			restartNote: "Library root / scope (workspaceDir / scope / storageDir) are boot-time bindings; edit the config file and restart.",
 			save: "Save",
 			saving: "Saving…",

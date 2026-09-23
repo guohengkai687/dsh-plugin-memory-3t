@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   approximateTokens,
   clampEntrySummary,
+  clampLines,
   clampTokens,
   dropReplayedPrompts,
   isReplayedPrompt,
@@ -11,6 +12,7 @@ import {
   renderRuntimeBlock,
   renderSpaceBlock,
   renderStatusBlock,
+  summarizeRuntimeLine,
   takeWithinBudget,
 } from '../dist/render.js'
 
@@ -220,4 +222,44 @@ test('render: dropReplayedPrompts 全部被剔除时返回空串（调用方据�
 
 test('render: normalizeForDedup 折叠空白（与写入侧对齐）', () => {
   assert.equal(normalizeForDedup('  a\n\tb   c '), 'a b c')
+})
+
+// ---------------------------------------------------------------- v0.7.0：L1 摘要 + 整行截断
+
+test('render(v0.7.0): summarizeRuntimeLine 保留前缀、截正文、其余行原样', () => {
+  const long = `- user: ${'甲'.repeat(200)}`
+  const out = summarizeRuntimeLine(long, 40)
+  assert.equal(out, `- user: ${'甲'.repeat(40)}…`)
+  // 短行不动
+  assert.equal(summarizeRuntimeLine('- user: 短', 40), '- user: 短')
+  // 标题行不动
+  assert.equal(summarizeRuntimeLine('## 2026-09-23', 5), '## 2026-09-23')
+  // digest 行同样按"首个空格之后"摘要（保持对非 user 行有效）
+  assert.equal(summarizeRuntimeLine(`- digest: ${'乙'.repeat(50)}`, 10), `- digest: ${'乙'.repeat(10)}…`)
+  // maxChars<=0 = 关闭摘要
+  assert.equal(summarizeRuntimeLine(long, 0), long)
+})
+
+test('render(v0.7.0): clampLines 按整行截断并标注省略行数（不切半句）', () => {
+  const lines = ['[dev-memory L1 流水] 最近会话（摘要）', '## 2026-09-23', ...Array.from({ length: 30 }, (_, i) => `- user: 第 ${i} 条足够长的流水内容用来吃掉预算`)]
+  const text = lines.join('\n')
+  const out = clampLines(text, 60)
+  assert.ok(approximateTokens(out) <= 60, '整行截断后必须回到预算内')
+  assert.ok(out.includes('已按预算省略'), '应标注省略行数')
+  // 保留下来的每一行都必须是"完整行"（存在于原文中）
+  for (const line of out.split('\n')) {
+    if (line.startsWith('…（已按预算省略')) continue
+    assert.ok(text.includes(line), `保留行必须是原文整行: ${line}`)
+  }
+  // 预算为 0 / 空文本
+  assert.equal(clampLines(text, 0), '')
+  assert.equal(clampLines('', 60), '')
+})
+
+test('render(v0.7.0): renderRuntimeBlock 逐行摘要 + 整行截断', () => {
+  const longLine = `- user: ${'丙'.repeat(400)}`
+  const out = renderRuntimeBlock('最近会话（摘要）', ['## 2026-09-23', longLine, '- user: 短行'], 200, 30)
+  assert.ok(out.includes(`- user: ${'丙'.repeat(30)}…`), '长行应按 maxCharsPerLine 摘要')
+  assert.ok(out.includes('- user: 短行'), '短行应保留')
+  assert.ok(!out.includes('丙'.repeat(31)), '不得残留超过上限的正文')
 })

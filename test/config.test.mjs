@@ -94,3 +94,16 @@ test('config: webui 面板开关（v0.5）', () => {
   assert.equal(mergeConfig({ webui: {} }).webui.enabled, true)
   assert.equal(mergeConfig({ webui: 'x' }).webui.enabled, true)
 })
+test('config(v0.7.0): 工具暴露面 / subagent 注入 / L1 摘要 默认值与覆盖', () => {
+  assert.equal(DEFAULT_CONFIG.toolsProfile, 'core')
+  assert.equal(DEFAULT_CONFIG.subagentInject, false)
+  assert.equal(DEFAULT_CONFIG.l1MaxCharsPerLine, 160)
+  // 非法值回落默认
+  assert.equal(mergeConfig({ toolsProfile: 'nope' }).toolsProfile, 'core')
+  assert.equal(mergeConfig({ subagentInject: 'yes' }).subagentInject, false)
+  // 显式覆盖
+  const c = mergeConfig({ toolsProfile: 'full', subagentInject: true, l1MaxCharsPerLine: 0 })
+  assert.equal(c.toolsProfile, 'full')
+  assert.equal(c.subagentInject, true)
+  assert.equal(c.l1MaxCharsPerLine, 0)
+})

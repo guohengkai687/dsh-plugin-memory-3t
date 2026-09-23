@@ -122,6 +122,21 @@ export type Scope = 'workspace' | 'user'
  */
 export type L3Inject = 'off' | 'salience' | 'query'
 
+/**
+ * 工具暴露面（v0.7.0）。
+ *
+ * 背景（2026-09-23 实测，见 .memory/docs/notes/2026-09-23-memory-3t-token-cost-evaluation.md）：
+ * DSH 每次模型调用都会带上全部工具的 schema（实测 39 个工具 = 9203 tokens），
+ * 其中 12 个 devmemory_* 占 2081 tokens / 调用——**占插件全部开销的 ~99%**，
+ * 而低频运维工具（diag/history/diff/restore/forget/link/seed）在整个 3 天窗口里
+ * 只被调用了 12 次（1188 次调用中）。
+ *
+ * - `core`（默认）：高频 5 件套 + 一个 action 式 `devmemory_admin` 覆盖全部低频运维，
+ *   常驻 schema 从 2081 → ~800 tokens/调用。
+ * - `full`：保留 v0.6 的 12 个独立工具（兼容旧习惯 / 需要逐工具粒度的场景）。
+ */
+export type ToolsProfile = 'core' | 'full'
+
 export interface Config {
   /** 记忆库根。相对路径基于基准目录解析：workspace 基准 = 会话工作区根；user 基准 = 用户主目录；绝对路径原样使用。 */
   storageDir: string
@@ -140,6 +155,21 @@ export interface Config {
   maxViewTokens: number
   /** L3 长期事实注入方式（v0.6.6，默认 off = 不注入）。 */
   l3Inject: L3Inject
+  /**
+   * L1 回放单行最大字符数（v0.7.0，默认 160）：流水行是 user prompt **原文**，
+   * 长 prompt 会整段占掉回放预算。超长按此处摘要（尾随 `…`），保留"谁在什么时候问了什么"。
+   */
+  l1MaxCharsPerLine: number
+  /**
+   * subagent 是否也注入会话视图（v0.7.0，默认 false）。
+   *
+   * 背景（实测）：扇出场景下每个子代理都继承一份视图（各自 ~1.3–3.2k tokens），
+   * 而 3 天窗口里 28 个子代理会话**一次都没调用过记忆工具**。默认关 =
+   * 子代理仍有记忆工具与静态 boot 协议，但不注入状态块/L1 回放/召回提醒。
+   */
+  subagentInject: boolean
+  /** 工具暴露面（v0.7.0，默认 core = 5 高频工具 + 1 个 action 式 admin）。 */
+  toolsProfile: ToolsProfile
   embedding: EmbeddingConfig
   digest: DigestConfig
   recall: RecallConfig
@@ -168,6 +198,10 @@ export const DEFAULT_CONFIG: Config = {
   // v0.6.6：默认不注入 L3——salience 排序选不出"相关"，只会把老条目顶上来占预算；
   // 需要时由模型用 devmemory_recall 按需查（与 L2 一致）。
   l3Inject: 'off',
+  // v0.7.0：L1 回放逐行摘要；子代理默认不注入；工具默认走精简暴露面
+  l1MaxCharsPerLine: 160,
+  subagentInject: false,
+  toolsProfile: 'core',
   embedding: { enabled: false, endpoint: 'http://localhost:11434', model: 'nomic-embed-text', timeoutMs: 3000 },
   digest: { maxMessages: 24, maxPromote: 20, maxRetries: 2 },
   recall: { defaultLimit: 10, minSalience: 0.25, highScore: 0.6 },
@@ -236,6 +270,11 @@ export function mergeConfig(partial: unknown): Config {
     maxViewTokens: clampNonNegative(p.maxViewTokens, DEFAULT_CONFIG.maxViewTokens),
     // v0.6.6：只认三个合法值，其余（含未配置）落回默认 off
     l3Inject: p.l3Inject === 'salience' || p.l3Inject === 'query' ? p.l3Inject : DEFAULT_CONFIG.l3Inject,
+    // v0.7.0：L1 逐行摘要上限（0 = 不摘要，保持 v0.6 行为）
+    l1MaxCharsPerLine: Math.floor(clampNonNegative(p.l1MaxCharsPerLine, DEFAULT_CONFIG.l1MaxCharsPerLine)),
+    // v0.7.0：子代理注入（默认 false）；工具暴露面（默认 core）
+    subagentInject: p.subagentInject === true,
+    toolsProfile: p.toolsProfile === 'full' ? 'full' : DEFAULT_CONFIG.toolsProfile,
     embedding: {
       enabled: embedding.enabled === true,
       endpoint:

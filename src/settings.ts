@@ -33,6 +33,8 @@ export interface ConfigChange {
   recall?: boolean
   /** v0.6.5：冷启动 seed 参数变更。 */
   seed?: boolean
+  /** v0.7.0：工具暴露面变更（注册发生在 apply 期，需重启插件生效）。 */
+  tools?: boolean
   budgets?: boolean
 }
 
@@ -89,6 +91,24 @@ export function applyEffective(target: Config, next: unknown): ConfigChange {
   if ((l3Inject === 'off' || l3Inject === 'salience' || l3Inject === 'query') && target.l3Inject !== l3Inject) {
     target.l3Inject = l3Inject
     change.recall = true
+  }
+  // v0.7.0：L1 逐行摘要上限（渲染时读取，live 生效；下一个会话视图生效）
+  const l1Max = asNum(n.l1MaxCharsPerLine)
+  if (l1Max !== undefined && l1Max >= 0 && target.l1MaxCharsPerLine !== Math.floor(l1Max)) {
+    target.l1MaxCharsPerLine = Math.floor(l1Max)
+    change.budgets = true
+  }
+  // v0.7.0：subagent 注入开关（会话启动边读取，下个子代理生效）
+  const subagentInject = asBool(n.subagentInject)
+  if (subagentInject !== undefined && target.subagentInject !== subagentInject) {
+    target.subagentInject = subagentInject
+    change.budgets = true
+  }
+  // v0.7.0：工具暴露面（注册发生在 apply 期，改动需重启插件生效——与文档一致）
+  const toolsProfile = asStr(n.toolsProfile)
+  if ((toolsProfile === 'core' || toolsProfile === 'full') && target.toolsProfile !== toolsProfile) {
+    target.toolsProfile = toolsProfile
+    change.tools = true
   }
 
   // 注意：storageDir / scope / workspaceDir 不在此处应用（启动期库根绑定，重启生效）
@@ -318,6 +338,10 @@ function buildSettingsSchema(z: SettingsDeps['z']): unknown {
     // v0.6.6：会话视图全局预算 + L3 注入方式（off/salience/query）
     maxViewTokens: z.number(),
     l3Inject: z.string(),
+    // v0.7.0：L1 逐行摘要 / subagent 注入 / 工具暴露面
+    l1MaxCharsPerLine: z.number(),
+    subagentInject: z.boolean(),
+    toolsProfile: z.string(),
   })
 }
 
@@ -338,6 +362,9 @@ export const SETTINGS_SURFACE_DEFAULTS = {
   maxSpaceTokens: 800,
   maxViewTokens: 2000,
   l3Inject: 'off',
+  l1MaxCharsPerLine: 160,
+  subagentInject: false,
+  toolsProfile: 'core',
 } as const
 
 // ---------------------------------------------------------------- install

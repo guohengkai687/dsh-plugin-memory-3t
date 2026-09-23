@@ -1,4 +1,4 @@
-/**
+﻿/**
  * v0.7 MCP stdio 服务器集成测试。
  *
  * 全部用例都**真实 spawn** `node bin/dev-memory-mcp.mjs --root <临时目录>`，
@@ -396,4 +396,37 @@ test('mcp: 工具业务失败 → result + isError；未知工具名 → -32602'
     await client.close()
     await cleanup(root)
   }
+})
+
+test('mcp(v0.7.0): --tools core 暴露 6 个工具（5 高频 + admin）', async () => {
+  const root = await makeRoot()
+  const core = new McpClient(['--root', root, '--no-vcs', '--tools', 'core'])
+  try {
+    const { result } = await core.request('tools/list')
+    const names = result.tools.map((tool) => tool.name).sort()
+    assert.deepEqual(names, ['devmemory_admin', 'devmemory_consolidate', 'devmemory_note', 'devmemory_recall', 'devmemory_remember', 'devmemory_status'])
+    // admin 的 op 覆盖全部低频动作（含 diag/restore 等危险操作）
+    const admin = result.tools.find((tool) => tool.name === 'devmemory_admin')
+    assert.deepEqual([...admin.inputSchema.properties.op.enum].sort(), ['diag', 'diff', 'forget', 'history', 'link', 'restore', 'seed'])
+    assert.equal(admin.inputSchema.type, 'object')
+  } finally {
+    await core.close()
+    await cleanup(root)
+  }
+})
+
+test('mcp(v0.7.0): --tools=core 等价写法与非法值退出码', async () => {
+  const root = await makeRoot()
+  const inline = new McpClient(['--root', root, '--no-vcs', '--tools=core'])
+  try {
+    const { result } = await inline.request('tools/list')
+    assert.equal(result.tools.length, 6, '--tools=core 内联写法应同样生效')
+  } finally {
+    await inline.close()
+    await cleanup(root)
+  }
+  // 非法值 → main() 返回 2（用法错误），stdout 不得出现 JSON-RPC 响应
+  const { main } = await import('../dist/mcp.js')
+  const code = await main(['--root', root, '--tools', 'nope'])
+  assert.equal(code, 2, '非法 --tools 应以退出码 2 结束')
 })

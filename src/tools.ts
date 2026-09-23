@@ -1,5 +1,15 @@
-/**
- * devmemory_* 工具定义（v0.6.5：12 个；DSH defineTool 兼容的平原对象，零 DSH 运行时依赖）。
+﻿/**
+ * devmemory_* 工具定义。
+ *
+ * v0.7.0（实测驱动的工具瘦身，见 .memory/docs/notes/2026-09-23-memory-3t-token-cost-evaluation.md）：
+ * DSH 每次模型调用都携带全部工具的 schema（实测 39 工具 = 9203 tokens），
+ * 12 个 devmemory_* 占 2081 tokens/调用——**占插件全部 token 开销的 ~99%**，
+ * 而低频运维工具在 3 天窗口的 1188 次调用里只被用到 12 次。因此：
+ *
+ * - 默认 `profile: 'core'`：5 个高频工具（status/recall/remember/note/consolidate）
+ *   + 1 个 action 式 `devmemory_admin`（op = link/forget/history/diff/restore/diag/seed）。
+ * - `profile: 'full'`：保留 v0.6 的 12 个独立工具（兼容逐工具粒度的调用习惯，MCP 默认走它）。
+ * - 所有描述同步精简：协议细节由 boot 块与 dev-memory skill 承担，schema 只讲"做什么/何时用"。
  *
  * schema 用纯 JSON 谱；output 一律 object-rooted 且带 render；
  * execute 内的路径参数全部经 store 的 safeJoin 防逃逸。
@@ -28,6 +38,14 @@ export interface ToolDefinition {
   execute(args: Record<string, unknown>, exec: unknown): Promise<unknown>
 }
 
+/** 工具暴露面（v0.7.0）；与 `config.toolsProfile` 同一取值域。 */
+export type ToolsProfile = 'core' | 'full'
+
+export interface CreateToolsOptions {
+  /** 默认 `core`（精简暴露面）；`full` = v0.6 的 12 个独立工具。 */
+  profile?: ToolsProfile
+}
+
 const JSON_OBJECT_OUTPUT = { type: 'object', properties: {} } as const
 
 function text(value: unknown): string {
@@ -42,8 +60,26 @@ function renderText(value: unknown): TextBlock[] {
 export type StoreGetter = MemoryStore | (() => MemoryStore)
 export type EngineGetter = DigestEngine | (() => DigestEngine)
 
+/** 低频运维动作：core 面合并进 `devmemory_admin`，full 面各自成工具。 */
+interface AdminAction {
+  /** full 面工具名。 */
+  tool: string
+  /** admin 面 `op` 取值。 */
+  op: string
+  /** full 面描述（精简版）。 */
+  description: string
+  /** 参数 properties（不含 dispatcher 字段）。 */
+  properties: Record<string, unknown>
+  required: string[]
+  execute(args: Record<string, unknown>): Promise<unknown>
+}
+
 /** 构建全部工具；store/engine 由插件入口注入（支持实例或惰性 getter，v0.3.1 会话工作区解析用 getter）。 */
-export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGetter): ToolDefinition[] {
+export function createTools(
+  storeOrGetter: StoreGetter,
+  engineOrGetter: EngineGetter,
+  options: CreateToolsOptions = {},
+): ToolDefinition[] {
   /** 惰性取当前工作区的记忆库：getter 时每次调用求值（会话工作区切换后工具自动跟新库）。 */
   const store = (): MemoryStore =>
     typeof storeOrGetter === 'function' ? (storeOrGetter as () => MemoryStore)() : storeOrGetter
@@ -86,6 +122,7 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
   /**
    * 诊断埋点包裹（v0.4）：每次调用记 usage（进程内内存计数）；execute 抛错时自动
    * 落一条 error 级诊断（工具名 + 参数摘要 + 消息 + 堆栈），随后原样重抛（行为不变）。
+   * v0.7.0：admin 面把 op 一并写进消息，否则 7 个动作的错误在诊断里无法区分。
    */
   const wrapDiag = (tool: ToolDefinition): ToolDefinition => {
     const execute = tool.execute
@@ -94,6 +131,8 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       execute: async (args, exec) => {
         const s = store()
         s.diag.noteUsage(tool.name)
+        const op = tool.name === 'devmemory_admin' ? str(args ?? {}, 'op') : undefined
+        const label = op !== undefined ? `${tool.name}:${op}` : tool.name
         try {
           return await execute(args, exec)
         } catch (error) {
@@ -102,7 +141,7 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
             .record({
               level: 'error',
               origin: 'tool',
-              tool: tool.name,
+              tool: label,
               message,
               args: sanitizeArgs(args ?? {}),
               stack: error instanceof Error ? (error.stack ?? undefined) : undefined,
@@ -138,138 +177,162 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
     return layerPaths(layers)
   }
 
-  const tools: ToolDefinition[] = [
-    {
-      name: 'devmemory_status',
-      description:
-        '检查三层记忆库状态：L1 流水 / L2 笔记 / L3 事实的条目数、库根、最近一次 digest、索引脏写计数与快照陈旧度（indexDocCount/indexStale）、git 版本回溯状态、向量检索状态、诊断记录计数（v0.4）。诊断或自检用。',
-      parameters: { type: 'object', properties: {} },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
-      async execute() {
-        const s = store()
-        const status = await s.status()
-        const digest = s.digestState
-        return {
-          ready: status.ready,
-          root: status.root,
-          scope: status.scope,
-          counts: status.counts,
-          lastDigestAt: status.lastDigestAt,
-          digestPending: digest.pending,
-          digestRetries: digest.retries,
-          digestLastError: digest.lastError,
-          indexDirty: status.indexDirty,
-          // v0.6.2：索引快照陈旧度（此工具为白名单构造，漏映射会让 store 新增字段不可见）
-          indexDocCount: status.indexDocCount,
-          indexStale: status.indexStale,
-          firstRun: status.firstRun,
-          vcs: status.vcs,
-          embedding: status.embedding,
-          // v0.4：诊断计数 + 最近 5 条记录
-          diag: { ...(await s.diag.counters()), recent: await s.diag.list({ limit: 5 }) },
-        }
-      },
+  const LAYERS_PROP = {
+    type: 'array',
+    items: { type: 'string', enum: ['l1', 'l2', 'l3'] },
+    description: '层过滤。',
+  }
+
+  // ---------------------------------------------------------------- 高频工具（core 面常驻）
+
+  const statusTool: ToolDefinition = {
+    name: 'devmemory_status',
+    description: '记忆库状态：条目数、库根、索引陈旧度、git 回溯、向量检索、诊断计数。诊断/自检用。',
+    parameters: { type: 'object', properties: {} },
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+    async execute() {
+      const s = store()
+      const status = await s.status()
+      const digest = s.digestState
+      return {
+        ready: status.ready,
+        root: status.root,
+        scope: status.scope,
+        counts: status.counts,
+        lastDigestAt: status.lastDigestAt,
+        digestPending: digest.pending,
+        digestRetries: digest.retries,
+        digestLastError: digest.lastError,
+        indexDirty: status.indexDirty,
+        // v0.6.2：索引快照陈旧度（此工具为白名单构造，漏映射会让 store 新增字段不可见）
+        indexDocCount: status.indexDocCount,
+        indexStale: status.indexStale,
+        firstRun: status.firstRun,
+        vcs: status.vcs,
+        embedding: status.embedding,
+        // v0.4：诊断计数 + 最近 5 条记录
+        diag: { ...(await s.diag.counters()), recent: await s.diag.list({ limit: 5 }) },
+      }
     },
-    {
-      name: 'devmemory_recall',
-      description:
-        '跨层查询记忆（唯一读入口）：同时检索 L1 会话流水、L2 知识笔记、L3 长期事实。查到就用，查不到要明说"记忆库中没有"，绝不臆造。',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: '聚焦的自然语言记忆查询。' },
-          maxResults: { type: 'number', description: '每层最多返回条数（默认 10）。' },
-          layers: {
-            type: 'array',
-            items: { type: 'string', enum: ['l1', 'l2', 'l3'] },
-            description: '限定检索层（默认全部）。',
-          },
-        },
-        required: ['query'],
+  }
+
+  const recallTool: ToolDefinition = {
+    name: 'devmemory_recall',
+    description: '跨层查记忆（L1 流水/L2 笔记/L3 事实，唯一读入口）。查到就用；查不到要明说"记忆库中没有"，绝不臆造。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '自然语言查询。' },
+        maxResults: { type: 'number', description: '每层条数（默认 10）。' },
+        layers: LAYERS_PROP,
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
-      async execute(args) {
-        const query = str(args, 'query') ?? ''
-        if (query.trim() === '') throw new Error('devmemory_recall: query 不能为空')
-        const maxResults = num(args, 'maxResults')
-        const layers = strArray(args, 'layers') as Array<'l1' | 'l2' | 'l3'> | undefined
-        return store().recall(query, { maxResults, layers })
-      },
+      required: ['query'],
     },
-    {
-      name: 'devmemory_remember',
-      description:
-        '写入 L3 长期事实条目：preference（偏好）/ decision（决策）/ entity（实体）/ context（项目上下文）。只写确定的、长期复用的信息；一次写一条；content 首行必须是一句话摘要。',
-      parameters: {
-        type: 'object',
-        properties: {
-          content: { type: 'string', description: '条目内容；首行为可单独成句的一句话摘要，后接背景（可选）。' },
-          kind: {
-            type: 'string',
-            enum: ['preference', 'decision', 'entity', 'context'],
-            description: '条目类别。',
-          },
-          tags: { type: 'array', items: { type: 'string' }, description: '标签（用于召回与互链，可选）。' },
-          importance: {
-            type: 'string',
-            enum: ['low', 'medium', 'high'],
-            description: '重要度（影响初始 salience，默认 medium）。',
-          },
-        },
-        required: ['content', 'kind'],
-      },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
-      async execute(args) {
-        const content = str(args, 'content') ?? ''
-        const kind = str(args, 'kind') as EntryKind
-        if (content.trim() === '') throw new Error('devmemory_remember: content 不能为空')
-        if (!['preference', 'decision', 'entity', 'context'].includes(kind)) {
-          throw new Error('devmemory_remember: kind 必须为 preference|decision|entity|context')
-        }
-        const importance = str(args, 'importance') as Importance | undefined
-        if (importance !== undefined && !['low', 'medium', 'high'].includes(importance)) {
-          throw new Error('devmemory_remember: importance 必须为 low|medium|high')
-        }
-        const entry = await store().remember({ kind, content, tags: strArray(args, 'tags'), importance })
-        return { id: entry.id, kind: entry.kind, summary: entry.summary }
-      },
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+    async execute(args) {
+      const query = str(args, 'query') ?? ''
+      if (query.trim() === '') throw new Error('devmemory_recall: query 不能为空')
+      const maxResults = num(args, 'maxResults')
+      const layers = strArray(args, 'layers') as Array<'l1' | 'l2' | 'l3'> | undefined
+      return store().recall(query, { maxResults, layers })
     },
-    {
-      name: 'devmemory_note',
-      description:
-        '写入 L2 知识笔记（完整背景：教程、方案、排查过程）。relPath 为记忆库 docs/ 下的相对路径（可含子目录，自动补 .md）；长篇内容用 append 追加到已有笔记，不要整篇重写。',
-      parameters: {
-        type: 'object',
-        properties: {
-          relPath: { type: 'string', description: '笔记相对路径，如 notes/2026-01-15-dsh-seams.md。' },
-          body: { type: 'string', description: '笔记正文（markdown）。' },
-          append: { type: 'boolean', description: '追加到已有笔记而非覆盖（默认 false）。' },
-        },
-        required: ['relPath', 'body'],
+  }
+
+  const rememberTool: ToolDefinition = {
+    name: 'devmemory_remember',
+    description: '写 L3 长期事实。只写确定且长期复用的；一次一条；content 首行是可独立成句的一句话摘要。',
+    parameters: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: '首行=一句话摘要，后接背景。' },
+        kind: { type: 'string', enum: ['preference', 'decision', 'entity', 'context'], description: '类别。' },
+        tags: { type: 'array', items: { type: 'string' }, description: '标签，可选。' },
+        importance: { type: 'string', enum: ['low', 'medium', 'high'], description: '默认 medium。' },
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
-      async execute(args) {
-        const relPath = str(args, 'relPath') ?? ''
-        const body = str(args, 'body') ?? ''
-        if (relPath.trim() === '') throw new Error('devmemory_note: relPath 不能为空')
-        if (body.trim() === '') throw new Error('devmemory_note: body 不能为空')
-        const append = bool(args, 'append') ?? false
-        const result = await store().note({ relPath, body, append })
-        return { path: result.path }
-      },
+      required: ['content', 'kind'],
     },
-    {
-      name: 'devmemory_link',
-      description: '在两条 L3 条目之间建立双向关联（写入双方 links；拒绝孤儿/自链）。',
-      parameters: {
-        type: 'object',
-        properties: {
-          a: { type: 'string', description: '第一条目的 id。' },
-          b: { type: 'string', description: '第二条目的 id。' },
-        },
-        required: ['a', 'b'],
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+    async execute(args) {
+      const content = str(args, 'content') ?? ''
+      const kind = str(args, 'kind') as EntryKind
+      if (content.trim() === '') throw new Error('devmemory_remember: content 不能为空')
+      if (!['preference', 'decision', 'entity', 'context'].includes(kind)) {
+        throw new Error('devmemory_remember: kind 必须为 preference|decision|entity|context')
+      }
+      const importance = str(args, 'importance') as Importance | undefined
+      if (importance !== undefined && !['low', 'medium', 'high'].includes(importance)) {
+        throw new Error('devmemory_remember: importance 必须为 low|medium|high')
+      }
+      const entry = await store().remember({ kind, content, tags: strArray(args, 'tags'), importance })
+      return { id: entry.id, kind: entry.kind, summary: entry.summary }
+    },
+  }
+
+  const noteTool: ToolDefinition = {
+    name: 'devmemory_note',
+    description: '写 L2 知识笔记（教程/方案/排查过程，含完整背景）。长内容用 append 追加，不要整篇重写。',
+    parameters: {
+      type: 'object',
+      properties: {
+        relPath: { type: 'string', description: 'docs/ 下相对路径，自动补 .md。' },
+        body: { type: 'string', description: 'markdown 正文。' },
+        append: { type: 'boolean', description: '追加而非覆盖（默认 false）。' },
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: ['relPath', 'body'],
+    },
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+    async execute(args) {
+      const relPath = str(args, 'relPath') ?? ''
+      const body = str(args, 'body') ?? ''
+      if (relPath.trim() === '') throw new Error('devmemory_note: relPath 不能为空')
+      if (body.trim() === '') throw new Error('devmemory_note: body 不能为空')
+      const append = bool(args, 'append') ?? false
+      const result = await store().note({ relPath, body, append })
+      return { path: result.path }
+    },
+  }
+
+  const consolidateTool: ToolDefinition = {
+    name: 'devmemory_consolidate',
+    description: '立即 digest 沉淀（去重提升 L3 / 超限转 L2 / 压缩 L1）并提交 git。用户说"记一下/整理记忆"时调用。',
+    parameters: { type: 'object', properties: {} },
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+    async execute() {
+      const s = store()
+      const key = `manual-${Date.now()}`
+      const summaries = await engine().maybeDigest({ key, messages: [], forced: true })
+      await s.flushVcs('digest')
+      // v0.4：digest 失败（待补做）→ 落 error 诊断
+      if (s.digestState.pending) {
+        void s.diag
+          .record({
+            level: 'error',
+            origin: 'digest',
+            tool: 'devmemory_consolidate',
+            message: `digest 失败待补做（重试 ${s.digestState.retries} 次）: ${s.digestState.lastError ?? '未知原因'}`,
+          })
+          .catch(() => undefined)
+      }
+      return {
+        triggered: true,
+        summaries: summaries ?? ['digest 未产生新沉淀（或失败，见 status）'],
+        vcs: await s.vcs.status(),
+      }
+    },
+  }
+
+  // ---------------------------------------------------------------- 低频运维动作
+
+  const adminActions: AdminAction[] = [
+    {
+      tool: 'devmemory_link',
+      op: 'link',
+      description: '在两条 L3 条目间建立双向关联（拒绝孤儿/自链）。',
+      properties: {
+        a: { type: 'string', description: 'L3 id。' },
+        b: { type: 'string', description: 'L3 id。' },
+      },
+      required: ['a', 'b'],
       async execute(args) {
         const a = str(args, 'a') ?? ''
         const b = str(args, 'b') ?? ''
@@ -278,19 +341,15 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
     {
-      name: 'devmemory_forget',
-      description:
-        '删除或降权 L3 条目（操作前请先用 devmemory_recall 确认目标存在）。demote 只把 salience 减半而不是删除；delete 会写审计日志。',
-      parameters: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: '要处理的条目 id。' },
-          mode: { type: 'string', enum: ['delete', 'demote'], description: 'delete 删除文件；demote 降权（默认 demote）。' },
-          reason: { type: 'string', description: '操作原因（写入审计，可选）。' },
-        },
-        required: ['id'],
+      tool: 'devmemory_forget',
+      op: 'forget',
+      description: '删除或降权 L3 条目（先用 recall 确认存在）：demote 降权（默认），delete 删除并写审计。',
+      properties: {
+        id: { type: 'string', description: 'L3 id。' },
+        mode: { type: 'string', enum: ['delete', 'demote'], description: 'delete 删除；demote 降权（默认）。' },
+        reason: { type: 'string' },
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: ['id'],
       async execute(args) {
         const id = str(args, 'id') ?? ''
         const mode = str(args, 'mode') === 'delete' ? 'delete' : 'demote'
@@ -301,51 +360,15 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
     {
-      name: 'devmemory_consolidate',
-      description:
-        '立即触发一次 digest 沉淀：把会话中的显式记忆内容去重后提升到 L3、超限转 L2 笔记、压缩 L1 流水，并提交 git 版本。用户说"记一下/整理记忆"时调用。',
-      parameters: { type: 'object', properties: {} },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
-      async execute() {
-        const s = store()
-        const key = `manual-${Date.now()}`
-        const summaries = await engine().maybeDigest({ key, messages: [], forced: true })
-        await s.flushVcs('digest')
-        // v0.4：digest 失败（待补做）→ 落 error 诊断
-        if (s.digestState.pending) {
-          void s.diag
-            .record({
-              level: 'error',
-              origin: 'digest',
-              tool: 'devmemory_consolidate',
-              message: `digest 失败待补做（重试 ${s.digestState.retries} 次）: ${s.digestState.lastError ?? '未知原因'}`,
-            })
-            .catch(() => undefined)
-        }
-        return {
-          triggered: true,
-          summaries: summaries ?? ['digest 未产生新沉淀（或失败，见 status）'],
-          vcs: await s.vcs.status(),
-        }
+      tool: 'devmemory_history',
+      op: 'history',
+      description: '记忆库 git 提交历史（可按层或库内路径过滤）。回溯排查用。',
+      properties: {
+        limit: { type: 'number', description: '条数（默认 10，diag 默认 20）。' },
+        layers: LAYERS_PROP,
+        path: { type: 'string', description: '库内路径（与 layers 二选一）。' },
       },
-    },
-    {
-      name: 'devmemory_history',
-      description:
-        '查看记忆库 git 提交历史：最近 N 次提交（hash/时间/提交信息/触及文件数），可按层（l1/l2/l3）或库内路径过滤。回溯排查用。',
-      parameters: {
-        type: 'object',
-        properties: {
-          limit: { type: 'number', description: '返回最近提交条数（默认 10，上限 50）。' },
-          layers: {
-            type: 'array',
-            items: { type: 'string', enum: ['l1', 'l2', 'l3'] },
-            description: '按层过滤只显示触及该层的提交。',
-          },
-          path: { type: 'string', description: '库内相对路径过滤（如 docs/notes/x.md；与 layers 二选一）。' },
-        },
-      },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: [],
       async execute(args) {
         const limit = Math.max(1, Math.min(50, Math.floor(num(args, 'limit') ?? 10)))
         const layers = strArray(args, 'layers')
@@ -355,22 +378,15 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
     {
-      name: 'devmemory_diff',
-      description:
-        '查看记忆库变更明细：指定提交相对其父提交改了什么（ref 省略时显示当前未提交变更），返回文件级增删行数与状态（A/M/D）。判断"这条记录记的是什么、要不要回滚"用。',
-      parameters: {
-        type: 'object',
-        properties: {
-          ref: { type: 'string', description: '提交标识（hash 或 HEAD~N）；省略时对比当前未提交变更。' },
-          layers: {
-            type: 'array',
-            items: { type: 'string', enum: ['l1', 'l2', 'l3'] },
-            description: '按层过滤。',
-          },
-          path: { type: 'string', description: '库内相对路径过滤（与 layers 二选一）。' },
-        },
+      tool: 'devmemory_diff',
+      op: 'diff',
+      description: '指定提交相对父提交的变更明细（文件级 A/M/D）；ref 省略时看未提交变更。',
+      properties: {
+        ref: { type: 'string', description: '省略=未提交变更。' },
+        layers: LAYERS_PROP,
+        path: { type: 'string', description: '库内路径（与 layers 二选一）。' },
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: [],
       async execute(args) {
         const ref = str(args, 'ref')
         const layers = strArray(args, 'layers')
@@ -380,23 +396,16 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
     {
-      name: 'devmemory_restore',
+      tool: 'devmemory_restore',
+      op: 'restore',
       description:
-        '把记忆库目标恢复到指定 git 提交的状态（危险操作，先 dryRun 预览）。恢复只改内容不回写历史：自动先保存当前状态为检查点提交，恢复本身也留一个新提交（可撤销的撤销）。targets 省略或填 all 时恢复整库时间片（全部被 git 跟踪的内容回到该提交，含之后的删除/新增一并反转）。恢复后建议用 devmemory_recall 核对。',
-      parameters: {
-        type: 'object',
-        properties: {
-          ref: { type: 'string', description: '要恢复到的提交（hash 或 HEAD~N）。必填。' },
-          targets: {
-            type: 'array',
-            items: { type: 'string' },
-            description: '恢复对象：层名（l1/l2/l3）或库内相对路径；省略或填 ["all"] = 整库时间片。可选。',
-          },
-          dryRun: { type: 'boolean', description: '仅预览将变更的文件清单（默认 true，先干跑确认再执行）。' },
-        },
-        required: ['ref'],
+        '把库恢复到指定提交（危险，先 dryRun 预览）。只改内容不回写历史；默认整库时间片；恢复后建议 recall 核对。',
+      properties: {
+        ref: { type: 'string', description: 'hash 或 HEAD~N。' },
+        targets: { type: 'array', items: { type: 'string' }, description: 'l1/l2/l3 或路径；省略=整库。' },
+        dryRun: { type: 'boolean', description: '默认 true（仅预览）。' },
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: ['ref'],
       async execute(args) {
         const ref = str(args, 'ref') ?? ''
         const targets = strArray(args, 'targets')
@@ -427,21 +436,18 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
     {
-      name: 'devmemory_diag',
-      description:
-        '查看诊断与异常记录汇总（v0.4）：插件在记忆管理调用中自动记录的调用异常与不符合预期的行为（工具报错 / 降级路径 / 生命周期失败，存 <库>/diag/events.jsonl）。summary 给汇总统计（分级/分工具/分来源 + 最近事件 + 本进程工具使用次数）；list 看明细；clear 清空后开启新一轮观察。使用一段时间后审查这批记录用于优化插件。',
-      parameters: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', enum: ['summary', 'list', 'clear'], description: 'summary=汇总统计（默认）；list=明细；clear=清空全部记录。' },
-          level: { type: 'string', enum: ['error', 'unexpected'], description: '按级别过滤（list 用）：error=调用异常；unexpected=不符合预期行为。' },
-          tool: { type: 'string', description: '按工具名过滤（list 用），如 devmemory_recall。' },
-          origin: { type: 'string', description: '按来源过滤（list 用），如 tool/session/digest/vcs/embed/webui/skill/nudge/restore。' },
-          days: { type: 'number', description: '只看最近 N 天的记录（list 用）。' },
-          limit: { type: 'number', description: '明细条数（默认 20，上限 100）。' },
-        },
+      tool: 'devmemory_diag',
+      op: 'diag',
+      description: '诊断与异常记录（工具报错 / 降级路径 / 生命周期失败）：summary 汇总、list 明细、clear 清空。',
+      properties: {
+        action: { type: 'string', enum: ['summary', 'list', 'clear'], description: '默认 summary。' },
+        level: { type: 'string', enum: ['error', 'unexpected'] },
+        tool: { type: 'string' },
+        origin: { type: 'string' },
+        days: { type: 'number' },
+        
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: [],
       async execute(args) {
         const s = store()
         const action = str(args, 'action') ?? 'summary'
@@ -464,16 +470,14 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
     {
-      name: 'devmemory_seed',
+      tool: 'devmemory_seed',
+      op: 'seed',
       description:
-        '冷启动 seed（v0.6.5）：记忆库为空时（会话状态块会提示"冷启动"），从仓库的**确定性信号**生成一篇项目骨架 L2 笔记——git 提交历史 / package.json / README 目录 / 顶层结构。**不调用任何 LLM**，零成本、可复现。同时返回一份"候选 L3"清单（**没有写入**：确认后才用 devmemory_remember 提升）。幂等：骨架已存在则跳过（force: true 才覆盖）。',
-      parameters: {
-        type: 'object',
-        properties: {
-          force: { type: 'boolean', description: '骨架笔记已存在时是否覆盖重建（默认 false，幂等不覆盖）。' },
-        },
+        '冷启动骨架（库为空时用）：从 git 历史 / package.json / README / 顶层结构生成一篇 L2 骨架笔记，不调用 LLM；候选 L3 只返回不写入。幂等。',
+      properties: {
+        force: { type: 'boolean', description: '覆盖已存在的骨架。' },
       },
-      output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+      required: [],
       async execute(args) {
         const s = store()
         // config 从 store 上取（createTools 不额外接收 config，避免签名膨胀）
@@ -481,5 +485,69 @@ export function createTools(storeOrGetter: StoreGetter, engineOrGetter: EngineGe
       },
     },
   ]
+
+  const adminTool: ToolDefinition = {
+    name: 'devmemory_admin',
+    description:
+      '低频运维（一次一件）：op=link 关联 L3 / forget 删除降权 / history git 历史 / diff 变更明细 / restore 恢复提交 / diag 诊断记录 / seed 冷启动骨架。',
+    parameters: {
+      type: 'object',
+      properties: {
+        op: {
+          type: 'string',
+          enum: adminActions.map((a) => a.op),
+          description: '运维动作。',
+        },
+        ...Object.assign({}, ...adminActions.map((a) => a.properties)),
+      },
+      required: ['op'],
+    },
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args, value) => renderText(value) },
+    async execute(args) {
+      const op = str(args, 'op') ?? ''
+      const action = adminActions.find((a) => a.op === op)
+      if (action === undefined) {
+        throw new Error(`devmemory_admin: 未知 op=${op}（可用：${adminActions.map((a) => a.op).join('/')}）`)
+      }
+      return action.execute(args)
+    },
+  }
+
+  const coreTools: ToolDefinition[] = [statusTool, recallTool, rememberTool, noteTool, consolidateTool]
+  const legacyTools: ToolDefinition[] = adminActions.map((action) => ({
+    name: action.tool,
+    description: action.description,
+    parameters: { type: 'object', properties: action.properties, ...(action.required.length > 0 ? { required: action.required } : {}) },
+    output: { schema: JSON_OBJECT_OUTPUT, render: (_args: unknown, value: unknown) => renderText(value) },
+    execute: (args: Record<string, unknown>) => action.execute(args),
+  }))
+
+  const tools = options.profile === 'full' ? [...coreTools, ...legacyTools] : [...coreTools, adminTool]
   return tools.map(wrapDiag)
 }
+
+/** core 面常驻工具名（测试与文档用）。 */
+export const CORE_TOOL_NAMES = [
+  'devmemory_status',
+  'devmemory_recall',
+  'devmemory_remember',
+  'devmemory_note',
+  'devmemory_consolidate',
+  'devmemory_admin',
+] as const
+
+/** full 面工具名（v0.6 的 12 个独立工具）。 */
+export const FULL_TOOL_NAMES = [
+  'devmemory_status',
+  'devmemory_recall',
+  'devmemory_remember',
+  'devmemory_note',
+  'devmemory_link',
+  'devmemory_forget',
+  'devmemory_consolidate',
+  'devmemory_history',
+  'devmemory_diff',
+  'devmemory_restore',
+  'devmemory_diag',
+  'devmemory_seed',
+] as const

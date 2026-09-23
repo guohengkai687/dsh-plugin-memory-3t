@@ -44,6 +44,61 @@ export function takeWithinBudget(remaining: number, want: number): number {
 }
 
 /**
+ * 按**整行**截断到 token 预算（v0.7.0）。
+ *
+ * 与 `clampTokens` 的区别：后者按字符贪心砍，会把最后一行切成半句
+ * （实测 L1 回放尾部出现 "Agent 98cd6262-c5de-48d7-b4d3-7e64a125ab48 " 这种残行）。
+ * 本函数只在行边界停，并显式标注省略了多少行——markdown 结构始终完整。
+ *
+ * @param text - 多行文本。
+ * @param budget - 近似 token 预算。
+ * @returns 预算内的整行文本（附省略标记）；一行都放不下时返回空串。
+ */
+export function clampLines(text: string, budget: number): string {
+  if (text === '' || budget <= 0) return ''
+  if (approximateTokens(text) <= budget) return text
+  const lines = text.split('\n')
+  const kept: string[] = []
+  let used = 0
+  for (const line of lines) {
+    const cost = approximateTokens(line) + (kept.length > 0 ? 1 : 0)
+    if (used + cost > budget) break
+    kept.push(line)
+    used += cost
+  }
+  if (kept.length === 0) return ''
+  const omitted = lines.length - kept.length
+  const marker = `\n…（已按预算省略 ${omitted} 行）`
+  // 标记本身可能超预算：逐步让出末尾行，直到连同标记都在预算内
+  while (kept.length > 0 && used + approximateTokens(marker) > budget) {
+    const removed = kept.pop()!
+    used -= approximateTokens(removed) + (kept.length > 0 ? 1 : 0)
+  }
+  if (kept.length === 0) return ''
+  return kept.join('\n') + marker
+}
+
+/**
+ * L1 流水行摘要（v0.7.0）：保留 `- 角色: ` 前缀，正文按字符上限截断。
+ *
+ * 动机：L1 存的是 user prompt **原文**（写入侧已截到 500 字），单条长 prompt
+ * 能吃掉整个回放预算，而回放的价值在"哪一天问过什么"，不在全文。
+ *
+ * @param line - 流水行（`- user: 正文` / `- digest: 正文` / `## 标题`）。
+ * @param maxChars - 正文最大字符数；<=0 表示不摘要（保持 v0.6 行为）。
+ */
+export function summarizeRuntimeLine(line: string, maxChars: number): string {
+  if (maxChars <= 0 || !line.startsWith('- ')) return line
+  const body = line.slice(2)
+  const space = body.indexOf(' ')
+  if (space === -1) return line
+  const prefix = body.slice(0, space + 1)
+  const content = body.slice(space + 1)
+  if (content.length <= maxChars) return line
+  return `- ${prefix}${content.slice(0, maxChars)}…`
+}
+
+/**
  * 逐条摘要钳制（v0.6.6）：超预算的摘要截断并用 `…` 显式标记，
  * 使整块不再因单条超长而被从块尾整体砍掉。
  * @param text - 摘要文本。
@@ -233,10 +288,10 @@ export function renderStatusBlock(status: StoreStatus, budget: number): string {
       ? `- ⚠ 记忆库不可用（降级）：${status.unavailableReason ?? '原因未知'}。本轮未注入记忆，读到的"没有相关内容"不代表历史里没有。`
       : '',
     status.availability === 'empty' || (status.firstRun && status.availability !== 'unavailable')
-      ? '- 记忆库为空（冷启动）：尚无积累，可在会话中记录；也可用 devmemory_seed 从仓库历史生成骨架。'
+      ? '- 记忆库为空（冷启动）：尚无积累，可在会话中记录；也可用 devmemory_admin(op="seed") 从仓库历史生成骨架。'
       : '',
     status.diag !== undefined && status.diag.total > 0
-      ? `- 诊断：累计 ${status.diag.total} 条异常/不符合预期（error ${status.diag.error} 条）。用 devmemory_diag 查看。`
+      ? `- 诊断：累计 ${status.diag.total} 条异常/不符合预期（error ${status.diag.error} 条）。用 devmemory_admin(op="diag") 查看。`
       : '',
     // v0.6.2：索引快照与库内文档数不一致（陈旧/超前）时显式告警，避免"recall 恒为空"再次静默发生
     status.indexStale === true
@@ -247,13 +302,20 @@ export function renderStatusBlock(status: StoreStatus, budget: number): string {
 }
 
 /**
- * L1 回放块：注入"今天/昨天"会话流水摘要（按预算钳制）。
- * @param lines - 已按日期排序的流水行（每行以 "- " 开头）。
+ * L1 回放块：注入"今天/昨天"会话流水摘要（逐行摘要 + 按行边界钳制）。
+ *
+ * v0.7.0 两处改动：
+ * - 每行正文按 `maxCharsPerLine` 摘要（长 prompt 不再独吞预算）；
+ * - 截断改为**整行**丢弃（`clampLines`），不再把最后一行切成半句。
+ *
+ * @param lines - 已按日期排序的流水行（每行以 "- " 开头，标题行以 "## " 开头）。
+ * @param maxCharsPerLine - 单行正文上限（0 = 不摘要）。
  */
-export function renderRuntimeBlock(label: string, lines: string[], budget: number): string {
+export function renderRuntimeBlock(label: string, lines: string[], budget: number, maxCharsPerLine = 0): string {
   if (lines.length === 0) return ''
   const head = `[dev-memory L1 流水] ${label}`
-  return clampTokens([head, ...lines].join('\n'), budget)
+  const summarized = lines.map((line) => summarizeRuntimeLine(line, maxCharsPerLine))
+  return clampLines([head, ...summarized].join('\n'), budget)
 }
 
 /**

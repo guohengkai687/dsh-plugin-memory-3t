@@ -38,7 +38,7 @@ import { resolve } from 'node:path'
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
-import { approximateTokens, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget, type StoreStatus } from './render.js'
+import { approximateTokens, clampLines, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget, type StoreStatus } from './render.js'
 import { seedLibrary } from './seed.js'
 import { resolveRoot } from './paths.js'
 import { loadMemorySkillContent, MEMORY_SKILL_DESCRIPTION, MEMORY_SKILL_INVOCATION, MEMORY_SKILL_NAME, MEMORY_SKILL_WHEN_TO_USE } from './skill.js'
@@ -408,18 +408,35 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
         }
       }
       // 2) 视图：根会话（无父会话或父视图缺失）装载；subagent 继承父会话视图
+      //
+      // v0.7.0：subagent 默认**不注入**会话视图/召回提醒（config.subagentInject=false）。
+      // 实测（3 天窗口）：28 个子代理会话共 274 次调用里一次都没用过记忆工具，
+      // 却各自领了一份视图 + 提醒。子代理仍保留记忆工具与静态 boot 协议，
+      // 需要时自己 recall 即可——把"自动喂"改成"按需取"。
+      const subagent = isSubagentAgent(agent)
+      const skipInject = subagent && !config.subagentInject
       if (parent === undefined || !viewBySession.has(parent)) {
-        const view = await loadSessionView(store, config, previous)
+        // v0.7.0：非 clear/compact 的重装保留已注入标记——headless 实测 pre-step 可能
+        // 早于本边触发，此时视图已懒加载并注入过，这里再置 false 会导致重复注入。
+        const view = await loadSessionView(store, config, previous, [], { keepInjected: !rerun })
         agentViews.set(agent, view)
         if (sessionId !== '') viewBySession.set(sessionId, view)
         if (parent === undefined && sessionId !== '') rootAgents.set(sessionId, agent)
       } else {
         const inherited = viewBySession.get(parent)
         if (inherited !== undefined) {
-          // 继承父视图内容，但 injected 置 false：subagent 有自己的上下文，需要自己那份一次注入
+          // 继承父视图内容；injected/reminded 由下面按 skipInject 统一置位
           const view = { ...inherited, reminded: 0, injected: false }
           agentViews.set(agent, view)
           if (sessionId !== '') viewBySession.set(sessionId, view)
+        }
+      }
+      if (skipInject) {
+        const view = agentViews.get(agent)
+        if (view !== undefined) {
+          // injected=true → takeSessionViewInjection 返回 null；reminded>=2 → computeReminder 返回 null
+          view.injected = true
+          view.reminded = 2
         }
       }
       cachedStatus = await store.status()
@@ -490,7 +507,11 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     const recentPrompts = sessionBuffer.slice(-RECENT_PROMPT_LIMIT).map((message) => message.text)
     let viewText: string | null = null
     try {
-      viewText = await takeSessionViewInjection(stepAgent, agentViews, stepStore, config, recentPrompts, warn)
+      // register：懒加载出来的视图也要进 viewBySession，subagent 才能按父会话 id 继承
+      viewText = await takeSessionViewInjection(stepAgent, agentViews, stepStore, config, recentPrompts, warn, (view) => {
+        const id = sessionIdOf(stepAgent)
+        if (id !== '') viewBySession.set(id, view)
+      })
     } catch (error) {
       warn(`[dev-memory] 会话视图注入计算失败（降级跳过）: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -578,7 +599,7 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
 
   // ------------------------------------------------------------ tools
 
-  for (const tool of createTools(() => ensureStore().store, () => ensureStore().engine)) {
+  for (const tool of createTools(() => ensureStore().store, () => ensureStore().engine, { profile: config.toolsProfile })) {
     try {
       ctx.tools.register(tool)
     } catch (error) {
@@ -633,14 +654,35 @@ function sessionIdOf(agent: unknown): string {
 
 /** 父会话 id（subagent 的 session.header.parentSession）；根会话无 parent → undefined。 */
 function parentSessionOf(agent: unknown): string | undefined {
+  const raw = headerFieldOf(agent, 'parentSession')
+  // v0.7.0：空串/纯空白视为"无父会话"——否则根会话会被误判成 subagent 而跳过注入
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : undefined
+}
+
+/**
+ * 是否子代理（v0.7.0）。
+ *
+ * 用**多信号**判定而不是只看 parentSession：DSH 的 session header 里
+ * `parentSession` / `origin: 'subagent'` / `delegationDepth` 三者都表达层级，
+ * 任一命中即视为子代理；空串等退化值一律按根会话处理（fail-open 到"注入"，
+ * 因为漏注入是静默失效，多注入只是多花 token）。
+ */
+function isSubagentAgent(agent: unknown): boolean {
+  const depth = headerFieldOf(agent, 'delegationDepth')
+  if (typeof depth === 'number' && depth > 0) return true
+  if (headerFieldOf(agent, 'origin') === 'subagent') return true
+  return parentSessionOf(agent) !== undefined
+}
+
+/** 读 agent.session.header 上的字段（缺省/异常 → undefined）。 */
+function headerFieldOf(agent: unknown, key: string): unknown {
   if (!isObject(agent)) return undefined
   try {
     const session = (agent as Record<string, unknown>).session
     if (!isObject(session)) return undefined
     const header = (session as Record<string, unknown>).header
     if (!isObject(header)) return undefined
-    const parent = (header as Record<string, unknown>).parentSession
-    return typeof parent === 'string' ? parent : undefined
+    return (header as Record<string, unknown>)[key]
   } catch {
     return undefined
   }
@@ -705,6 +747,7 @@ async function loadSessionView(
   config: Config,
   previous: AgentView | undefined,
   knownPrompts: readonly string[] = [],
+  options: { keepInjected?: boolean } = {},
 ): Promise<AgentView> {
   const status = await store.status()
   const runtimeLines = await collectRuntimeLines(store, knownPrompts)
@@ -714,8 +757,9 @@ async function loadSessionView(
     runtime: renderRuntimeFromLines(runtimeLines, config),
     l3: null,
     reminded: previous?.reminded ?? 0,
-    // 每次会话启动（含 clear/compact 重装）都重置为未注入，交给 pre-step 做一次性注入
-    injected: false,
+    // v0.7.0：keepInjected——非 clear/compact 的重装不得把已注入状态重置（否则会重复注入）；
+    // 默认仍为 false（每次会话启动/clear/compact 重装都重置为未注入）。
+    injected: options.keepInjected === true ? (previous?.injected ?? false) : false,
   }
 }
 
@@ -783,17 +827,29 @@ async function takeSessionViewInjection(
   config: Config,
   recentPrompts: readonly string[] = [],
   onDegrade?: (message: string) => void,
+  register?: (view: AgentView) => void,
 ): Promise<string | null> {
   if (!isObject(agent)) return null
-  const view = views.get(agent)
+  let view = views.get(agent)
+  // v0.7.0：视图缺失时**就地懒加载**。headless 实测 `agent/pre-step` 可能早于
+  // `agent/created` / `agent/session-start` 触发（单步会话没有第二次机会），
+  // 原来的"等启动边装载"会让整轮注入静默消失。这里按 payload.agent 的会话工作区
+  // 自己装载一份，彻底去掉对事件顺序的依赖（注释里声明的意图终于落实）。
+  if (view === undefined && store !== null) {
+    if (isSubagentAgent(agent) && !config.subagentInject) return null
+    view = await loadSessionView(store, config, undefined, recentPrompts)
+    views.set(agent, view)
+    register?.(view)
+  }
   if (view === undefined || view.injected) return null
   view.injected = true
 
   let remaining = Math.max(0, config.maxViewTokens)
   const blocks: string[] = []
-  const push = (text: string, budget: number): void => {
+  const push = (text: string, budget: number, lineAware = false): void => {
     if (text === '' || budget <= 0) return
-    const clamped = clampTokens(text, budget)
+    // v0.7.0：L1 回放走整行截断（不再切半句），其余块沿用字符级钳制
+    const clamped = lineAware ? clampLines(text, budget) : clampTokens(text, budget)
     remaining -= approximateTokens(clamped)
     if (clamped !== '') blocks.push(clamped)
   }
@@ -803,7 +859,7 @@ async function takeSessionViewInjection(
   push(view.status, statusBudget)
   // L1 回放：去掉已在上下文里的用户消息（v0.6.6），再按剩余额度注入
   const runtimeBudget = takeWithinBudget(remaining, config.maxRuntimeTokens)
-  push(dropReplayedPrompts(view.runtime, recentPrompts), runtimeBudget)
+  push(dropReplayedPrompts(view.runtime, recentPrompts), runtimeBudget, true)
   // L3（v0.6.6 惰性 + 默认关闭）
   if (config.l3Inject !== 'off' && remaining > 0) {
     if (view.l3 === null) view.l3 = await lazyL3Block(store, config, recentPrompts)
@@ -861,7 +917,8 @@ async function lazyL3Block(
 
 function renderRuntimeFromLines(lines: string[], config: Config): string {
   if (lines.length === 0) return ''
-  return renderRuntimeBlock('最近会话（摘要）', lines, config.maxRuntimeTokens)
+  // v0.7.0：逐行摘要（长 prompt 不再独吞回放预算）+ 整行截断
+  return renderRuntimeBlock('最近会话（摘要）', lines, config.maxRuntimeTokens, config.l1MaxCharsPerLine)
 }
 
 // 导出供测试使用的内部成员（避免测试触及私有实现细节）

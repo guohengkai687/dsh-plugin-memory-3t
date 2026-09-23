@@ -46,6 +46,8 @@ export interface IndexEntry {
   text: string
   /** term -> tf */
   tf: Record<string, number>
+  /** v0.7.0：标题（首行）分词 tf——标题命中是"这篇讲的就是这个"的强信号。 */
+  titleTf: Record<string, number>
 }
 
 export interface IndexFile {
@@ -59,8 +61,11 @@ export interface IndexFile {
   postings: Record<string, Record<string, number>>
 }
 
-/** v0.6.1：升到 2——索引键从 id 改为 docKey，旧快照判废。 */
-export const INDEX_SCHEMA_VERSION = 2
+/**
+ * v0.7.0：升到 3——索引元数据新增 `titleTf`（标题分词），旧快照判废重建；
+ * 同时检索改为"BM25 × 覆盖率 × 标题命中"（见 `scored`）。
+ */
+export const INDEX_SCHEMA_VERSION = 3
 
 const EN_WORD = /[A-Za-z0-9_]+/g
 const CJK_CHAR = /[\u4e00-\u9fff]/g
@@ -84,6 +89,21 @@ function countTerms(tokens: string[]): Record<string, number> {
   return tf
 }
 
+/** 标题长度上限（字符）：够表达"这篇讲什么"，又不让正文首段冒充标题。 */
+const TITLE_MAX_CHARS = 200
+
+/**
+ * 文档标题：首个非空行，去掉 markdown `#` 前缀（v0.7.0）。
+ * L2 笔记首行是 `# 标题`、L3 首行是一句话摘要、L1 首行是 `# 日期`——三层都成立。
+ */
+export function titleOf(text: string): string {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim().replace(/^#+\s*/u, '')
+    if (trimmed !== '') return trimmed.slice(0, TITLE_MAX_CHARS)
+  }
+  return ''
+}
+
 /**
  * 从扫描到的文档构建完整索引（全量重建）。
  * 输入文档需自带评分元数据（salience/accesses/kind/tags），来自 store 的三层文件。
@@ -103,6 +123,7 @@ export function buildIndex(docs: IndexedDoc[]): IndexFile {
       len: Math.max(1, tokens.length),
       text: doc.text,
       tf: countTerms(tokens),
+      titleTf: countTerms(tokenize(titleOf(doc.text))),
     }
   })
   const docCount = entries.length
@@ -119,6 +140,7 @@ export function buildIndex(docs: IndexedDoc[]): IndexFile {
       salience: entry.salience,
       accesses: entry.accesses,
       len: entry.len,
+      titleTf: entry.titleTf,
     }
     for (const [term, tf] of Object.entries(entry.tf)) {
       const bucket = (postings[term] ??= {})
@@ -157,20 +179,48 @@ const KIND_WEIGHT: Record<string, number> = {
 }
 
 /**
- * 元数据加成：BM25 分数 × salience 加成 × access 加成 × kind 权重 × tag 命中加成。
+ * 元数据加成：BM25 分数 × salience × access × kind × tag 命中 × **覆盖率** × **标题命中**（v0.7.0）。
+ *
+ * v0.7.0 新增后两项，修的是实测里的排序失真：查询
+ * `dsh-plugin-memory-3t 架构设计 三层记忆 实现细节` 的首位命中是《DSH 浏览器卡顿排查》
+ * ——长文档只要反复出现 `dsh` 这类高频词就能靠 BM25 累积取胜，哪怕它只覆盖了
+ * 查询里的一个词。覆盖率惩罚"只沾一个词的长文"，标题命中奖励"标题就在讲这件事"。
+ *
  * @param queryTokens - 查询分词。
- * @param queryTags - 查询中与条目 tags 精确匹配的词（由调用方从 query 文本提取 token 集合后传入）。
+ * @param entry - 文档元数据（含 tags/kind 与 v0.7.0 的 titleTf）。
+ * @param matched - 本文档命中的**去重**查询词数。
+ * @param effective - 全库中有倒排桶（df>0）的去重查询词数（避免拿"库里根本没有的词"扣分）。
  */
 export function scored(
   bm25: number,
-  entry: { salience: number; accesses: number; kind?: string; tags: string[] },
+  entry: { salience: number; accesses: number; kind?: string; tags: string[]; titleTf?: Record<string, number> },
   queryTokens: string[],
+  matched = 0,
+  effective = 0,
 ): number {
   const salienceBoost = 0.6 + 0.4 * entry.salience
   const accessBoost = 1 + 0.25 * Math.log2(1 + entry.accesses)
   const kindBoost = entry.kind !== undefined ? (KIND_WEIGHT[entry.kind] ?? 1.0) : 1.0
   const tagHit = queryTokens.some((t) => entry.tags.includes(t)) ? 1.3 : 1.0
-  return bm25 * salienceBoost * accessBoost * kindBoost * tagHit
+  return bm25 * salienceBoost * accessBoost * kindBoost * tagHit * coverageBoost(matched, effective) * titleBoost(entry.titleTf, queryTokens)
+}
+
+/** 覆盖率加成：命中查询词越全分越高（全命中 1.0，命中 1/4 约 0.51）。 */
+export function coverageBoost(matched: number, effective: number): number {
+  if (effective <= 0) return 1
+  const coverage = Math.min(1, matched / effective)
+  return 0.35 + 0.65 * coverage
+}
+
+/** 标题命中加成：标题里出现的查询词占比越高加成越大（上限 ×1.5）。 */
+export function titleBoost(titleTf: Record<string, number> | undefined, queryTokens: string[]): number {
+  if (titleTf === undefined) return 1
+  const distinct = [...new Set(queryTokens)]
+  if (distinct.length === 0) return 1
+  let hit = 0
+  for (const token of distinct) if (titleTf[token] !== undefined) hit += 1
+  if (hit === 0) return 1
+  return 1 + 0.5 * (hit / distinct.length)
 }
 
 export interface RecallHit {
@@ -206,6 +256,8 @@ export function searchIndex(
     const n = index.postings[term] === undefined ? 0 : Object.keys(index.postings[term]!).length
     return n === 0 ? 0 : Math.log(1 + (docCount - n + 0.5) / (n + 0.5))
   }
+  // v0.7.0：覆盖率分母 = 库里真实存在的查询词数（df>0），避免用"库里没有的词"惩罚所有文档
+  const effective = queryTokens.filter((t) => index.postings[t] !== undefined).length
   const hits: RecallHit[] = []
   const docs = index.docs
   for (const [docKey, meta] of Object.entries(docs)) {
@@ -219,7 +271,13 @@ export function searchIndex(
     if (raw <= 0) continue
     const layer = meta.layer
     if (!includeLayers.includes(layer)) continue
-    const final = scored(raw, { salience: meta.salience, accesses: meta.accesses, kind: meta.kind, tags: meta.tags }, queryTokens)
+    const final = scored(
+      raw,
+      { salience: meta.salience, accesses: meta.accesses, kind: meta.kind, tags: meta.tags, titleTf: meta.titleTf },
+      queryTokens,
+      Object.keys(ownTf).length,
+      effective,
+    )
     hits.push({ docKey, layer, id: meta.id, score: final, summary: meta.id })
   }
   hits.sort((a, b) => b.score - a.score)

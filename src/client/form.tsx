@@ -318,6 +318,19 @@ export const SECTION_FIELDS: Field[] = [
   { kind: 'number', key: 'maxRuntimeTokens', label: 'maxRuntimeTokens', min: 0, step: 100 },
   { kind: 'number', key: 'maxSpaceTokens', label: 'maxSpaceTokens', min: 0, step: 100 },
   { kind: 'number', key: 'maxViewTokens', label: 'maxViewTokens', hint: 'maxViewTokensHint', min: 0, step: 100 },
+  { kind: 'number', key: 'l1MaxCharsPerLine', label: 'l1MaxCharsPerLine', hint: 'l1MaxCharsPerLineHint', min: 0, step: 20 },
+  { kind: 'toggle', key: 'subagentInject', label: 'subagentInject', hint: 'subagentInjectHint' },
+  // v0.7.0：工具暴露面（core = 5 高频 + 1 个 action 式 admin，省 ~1.2k tokens/调用）
+  {
+    kind: 'select',
+    key: 'toolsProfile',
+    label: 'toolsProfile',
+    hint: 'toolsProfileHint',
+    options: [
+      { value: 'core', label: 'toolsProfileCore' },
+      { value: 'full', label: 'toolsProfileFull' },
+    ],
+  },
 ]
 
 /** 可配置卡片（Plugins 选项卡）的紧凑字段表。 */

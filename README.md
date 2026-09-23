@@ -48,20 +48,32 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 
 ## 工具
 
-| 工具 | 作用 |
+**默认 `toolsProfile: 'core'`（v0.7.0）**：5 个高频工具 + 1 个 action 式 `devmemory_admin`（低频运维合并），常驻 schema 实测比 v0.6.6 的 12 个独立工具**少约 1.1k tokens/次模型调用**。设 `toolsProfile: 'full'` 可切回 v0.6 的 12 个独立工具。
+
+| 工具（core 面） | 作用 |
 |---|---|
 | `devmemory_status` | 层统计 / 索引状态 / 最近 digest / git 版本状态 / 向量检索状态 / 诊断计数 / scope（诊断自检） |
 | `devmemory_recall` | 跨层查询（唯一读入口，按层分组返回命中） |
 | `devmemory_remember` | 写 L3 条目（kind: preference/decision/entity/context） |
 | `devmemory_note` | 写/追加 L2 笔记（防路径逃逸） |
-| `devmemory_link` | L3 条目双向互链（拒孤儿） |
-| `devmemory_forget` | 删除或降权（写 audit.jsonl 审计） |
 | `devmemory_consolidate` | 立即触发 digest 沉淀 + 提交 git 版本 |
-| `devmemory_history` | git 提交历史（按层/路径过滤，回溯排查） |
-| `devmemory_diff` | 变更明细（某次提交或未提交变更，文件级增删行） |
-| `devmemory_restore` | 恢复到指定提交（dry-run 先行 + 检查点 + 可撤销的撤销；targets 省略 = 整库时间片） |
-| `devmemory_diag` | 诊断与异常记录汇总（v0.4）：summary 统计 / list 明细 / clear 清空 |
-| `devmemory_seed` | 冷启动 seed（v0.6.5）：库为空时从仓库确定性信号（git 历史 / package.json / README / 顶层结构）生成项目骨架 L2 + 候选 L3 清单，**无 LLM** |
+| `devmemory_admin` | 低频运维（一次一件）：`op=link` L3 互链 / `forget` 删除或降权 / `history` git 历史 / `diff` 变更明细 / `restore` 恢复提交 / `diag` 诊断记录 / `seed` 冷启动骨架 |
+
+`full` 面 = 上面 5 个高频工具 + 下面 7 个独立工具（与 v0.6 完全一致，迁移无感）：
+
+| full 面独立工具 | 等价 admin 调用 |
+|---|---|
+| `devmemory_link` | `devmemory_admin(op="link", a, b)` |
+| `devmemory_forget` | `devmemory_admin(op="forget", id, mode, reason)` |
+| `devmemory_history` | `devmemory_admin(op="history", limit, layers, path)` |
+| `devmemory_diff` | `devmemory_admin(op="diff", ref, layers, path)` |
+| `devmemory_restore` | `devmemory_admin(op="restore", ref, targets, dryRun)` |
+| `devmemory_diag` | `devmemory_admin(op="diag", action, level, tool, origin, days, limit)` |
+| `devmemory_seed` | `devmemory_admin(op="seed", force)` |
+
+> **为什么合并**（2026-09-23 实测）：DSH 每次模型调用都会带上全部工具的 schema（实测 39 个工具 = 9203 tokens），其中 12 个 `devmemory_*` 占 **2081 tokens/调用 ≈ 插件全部 token 开销的 99%**；而这 7 个低频工具在 3 天窗口的 1188 次调用里只被用到 12 次。合并后 core 面实测 **943 tokens/调用（-55%）**。完整测量链路见 `.memory/docs/notes/2026-09-23-memory-3t-token-cost-evaluation.md`。
+
+> `devmemory_admin` 的 `op` 是**必填**，参数与 full 面同名（`id`/`a`/`b`/`ref`/`targets`/`layers`/`path`/`limit`/`dryRun`/`force`/`action`/`level`/`tool`/`origin`/`days`/`mode`/`reason`）。`devmemory_restore` 的 `dryRun` 默认仍为 `true`——先预览、再执行。
 
 > v0.4 起每个工具的执行都会被自动埋点：**调用异常**与**不符合预期的行为**（工具报错、降级路径、生命周期失败等）自动记入 `<库>/diag/events.jsonl`，`devmemory_diag` / `devmemory_status` / WebUI 面板可查看，使用一段时间后审查这批记录用于优化插件。
 
@@ -83,6 +95,9 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 | `maxSpaceTokens` | 800 | L3 top-k 预算 |
 | `maxViewTokens` | 2000 | **v0.6.6**：会话视图（状态块 + L1 回放 + L3）**全局**预算，按序扣减剩余额度，防止前一块挤光后面 |
 | `l3Inject` | `off` | **v0.6.6**：L3 长期事实注入方式——`off`（默认，不注入，按需 recall）/ `salience`（按 salience+accesses 取 top-5）/ `query`（按会话首条消息 BM25 检索，门槛 `recall.highScore`）。下一会话生效 |
+| `l1MaxCharsPerLine` | 160 | **v0.7.0**：L1 回放**单行正文**字符上限（0 = 不摘要）。流水行是提问原文，超长按此截断加 `…`，避免一条长 prompt 独吞回放预算 |
+| `subagentInject` | false | **v0.7.0**：subagent 是否也注入会话视图/召回提醒。默认 false = 子代理保留记忆工具与静态 boot 协议，但不自动注入（扇出场景实测 28 个子代理会话零次使用记忆工具）。置 true 恢复 v0.6 行为 |
+| `toolsProfile` | `core` | **v0.7.0**：工具暴露面——`core`（5 高频 + 1 个 action 式 `devmemory_admin`，省约 1.1k tokens/调用）/ `full`（v0.6 的 12 个独立工具）。改动需重启插件生效 |
 | `embedding.enabled` | false | 向量检索开关（Ollama 本地）；开启后 L2/L3 写入同步生成向量，检索走向量+BM25 融合 |
 | `embedding.endpoint` | `http://localhost:11434` | Ollama HTTP API 地址 |
 | `embedding.model` | `nomic-embed-text` | 嵌入模型名 |
@@ -254,6 +269,20 @@ v0.6.5 把召回内容改成"每会话一次"后，实测仍有三个浪费点�
 
 > L3 仍然可用、可写：只是默认不再"无差别地推进 prompt"。要恢复旧行为：设置页把「L3 长期事实注入」改为 `按 salience 取 top-5`，或在 `cordis.patch.yml` 里设 `l3Inject: salience`。
 
+## 工具瘦身与注入精修（v0.7.0）
+
+v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-meter/ledger.json` + 会话日志逐条解析，窗口 = 33 会话 / 1188 次模型调用 / 1.76 亿上下文 tokens），据此做了四件事：
+
+| 实测问题 | 处置（v0.7.0） | 效果 |
+|---|---|---|
+| **工具 schema 占插件开销 ~99%**：12 个 `devmemory_*` = **2081 tokens/调用**，且 DSH 每次请求都带全部 tools；7 个低频运维工具 3 天里只用了 12 次 | `toolsProfile: 'core'`（默认）：合并为 `devmemory_admin`（`op` 分发）+ 全部描述精简；`full` 保留 12 个独立工具 | core 面 **943 tokens/调用（-55%）** |
+| **子代理白付注入**：28 个子代理会话（274 次调用）一次都没用过记忆工具，却各自继承一份视图 + 召回提醒 | `subagentInject: false`（默认）：子代理保留工具与静态 boot 协议，不再自动注入视图/提醒 | 每个子代理会话省一次视图注入 |
+| **L1 回放切半句**：`clampTokens` 按字符砍，注入尾部出现 `Agent 98cd6262-… ` 这类残行；且单条长 prompt 能吃掉整块预算 | `clampLines` 按**整行**截断并标注省略行数；`summarizeRuntimeLine` 逐行摘要（`l1MaxCharsPerLine`，默认 160 字） | markdown 结构始终完整；长 prompt 不再独吞预算 |
+| **BM25 排序失真**：查 `dsh-plugin-memory-3t 架构设计 三层记忆 实现细节`，首位命中是《DSH 浏览器卡顿排查》——长文只要反复出现 `dsh` 就能靠 tf 累积取胜 | 检索分改为 `BM25 × 覆盖率 × 标题命中`（`coverageBoost` / `titleBoost`，索引 `schemaVersion: 3` 带 `titleTf`） | 只沾一个高频词的长文被降权；标题就讲这件事的短文排前 |
+| **注入依赖事件顺序**（headless 真机实测发现）：`agent/pre-step` 可能早于 `agent/created` / `agent/session-start` 触发，而视图只在启动边装载 → **单步会话整轮注入静默消失**（多步会话靠后续 pre-step 掩盖了这个问题） | `takeSessionViewInjection` 在视图缺失时按 `payload.agent` 的会话工作区**就地懒加载**；启动边之后的重装保留已注入标记（`keepInjected`），避免重复注入 | 注入不再依赖事件顺序；根会话判定改为多信号（`delegationDepth` / `origin` / `parentSession`）且空串按根会话处理 |
+
+> 版本回落开关：`toolsProfile: 'full'` + `subagentInject: true` + `l1MaxCharsPerLine: 0` 即回到 v0.6.6 的注入/暴露行为（检索分改进无法关闭——它是纯排序质量修复，索引会自动重建）。
+
 ## 诊断与异常记录（v0.4）
 
 插件在**每次记忆管理调用**时自动记录两类内容到 `<库>/diag/events.jsonl`（默认开，`diag.enabled=false` 可整体关闭）：
@@ -323,7 +352,7 @@ DEV_MEMORY_ROOT=D:/my/repo dev-memory-mcp --storage-dir .memory --scope workspac
 - **手写 JSON-RPC 2.0，零依赖**：**刻意不引入 `@modelcontextprotocol/sdk`**（那正是 Hindsight 的依赖之一），以保住"零运行时依赖"这一核心定位。
 - **方法**：`initialize`（回显客户端 `protocolVersion`，缺省 `2025-06-18`；`capabilities.tools` + `serverInfo` + `instructions`）、`ping`、`notifications/initialized`（静默、不应答）、`tools/list`（`{name, description, inputSchema}`，一律 object-rooted）、`tools/call`（`{content:[{type:'text',text}], isError}`）。
 - **错误语义分界（有意区分两层）**：协议层失败 → JSON-RPC `error`（未知方法 `-32601` / 参数或工具名非法 `-32602` / 内部错误 `-32603` / 坏行若能恢复出 id 则 `-32700`，否则忽略并写 stderr，**进程不死**）；**工具业务失败 → JSON-RPC `result` + `isError: true`**（MCP 惯例：工具错误是模型可见的数据，不是协议故障）。
-- **配置**：`--root` / `DEV_MEMORY_ROOT`（默认 cwd）、`--storage-dir` / `DEV_MEMORY_STORAGE_DIR`（默认 `.memory`）、`--scope workspace|user`、`--no-vcs`、`--vcs-branch`、`--embedding`、`-h/--help`；`--flag=value` 与 `--flag value` 都支持；退出码 0/1/2。
+- **配置**：`--root` / `DEV_MEMORY_ROOT`（默认 cwd）、`--storage-dir` / `DEV_MEMORY_STORAGE_DIR`（默认 `.memory`）、`--scope workspace|user`、`--no-vcs`、`--vcs-branch`、`--embedding`、`--tools core|full`（v0.7.0，默认 `full`——MCP 客户端看不到本插件的 boot 块与 skill，逐工具粒度更稳；想让对方模型少带 ~1.1k tokens/调用时用 `--tools core`）、`-h/--help`；`--flag=value` 与 `--flag value` 都支持；退出码 0/1/2。
 - **stdout 只走协议**（日志与诊断一律 stderr）；换行分隔 JSON、请求串行处理；stdin EOF → 排空队列 → `flushVcs` → 退出 0。
 - **与 DSH 面同源**：复用同一 `MemoryStore` + `createTools`，工具文本由各工具自己的 `output.render` 产出，因此两个面输出逐字节一致。
 - **边界**：MCP 面没有 DSH 会话，故库根必须由 `--root`（或 `DEV_MEMORY_ROOT`）**显式给出**——这正是"库根来源守卫"在会话面要求的同一件事，在 MCP 面变成了必填参数。会话视图注入、pre-step 提醒、WebUI/设置页等 DSH 专属能力不在 MCP 面（MCP 只暴露工具）。

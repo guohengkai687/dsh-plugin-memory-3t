@@ -1,9 +1,9 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { tokenize, buildIndex, bm25Score, searchIndex, IndexManager, INDEX_SCHEMA_VERSION } from '../dist/indexer.js'
+import { tokenize, buildIndex, bm25Score, searchIndex, IndexManager, INDEX_SCHEMA_VERSION, titleOf, coverageBoost, titleBoost } from '../dist/indexer.js'
 
 test('tokenize: 英文单词小写', () => {
   const tokens = tokenize('dsh plugin MEMORY')
@@ -231,5 +231,52 @@ test('IndexManager: snapshotDocCount 未加载时读磁盘、缺失返回 null',
     await mgr.get(async () => mkDocs(3))
     const other = new IndexManager(idxPath, 50)
     assert.equal(await other.snapshotDocCount(), 3)
+  })
+})
+// ---------------------------------------------------------------- v0.7.0：检索质量（标题加权 + 覆盖率重排）
+
+test('indexer(v0.7.0): titleOf 取首个非空行并剥掉 # 前缀', () => {
+  assert.equal(titleOf('# 标题行\n正文'), '标题行')
+  assert.equal(titleOf('\n\n   摘要行\n正文'), '摘要行')
+  assert.equal(titleOf('无换行正文'), '无换行正文')
+  assert.equal(titleOf(''), '')
+})
+
+test('indexer(v0.7.0): coverageBoost 惩罚"只沾一个词"，titleBoost 奖励标题命中', () => {
+  assert.equal(coverageBoost(0, 0), 1)
+  assert.ok(coverageBoost(1, 6) < 0.6, '命中 1/6 应显著降权')
+  assert.equal(coverageBoost(6, 6), 1, '全命中不加权也不降权')
+  assert.equal(titleBoost(undefined, ['a']), 1)
+  assert.equal(titleBoost({ a: 1 }, ['x']), 1)
+  assert.ok(titleBoost({ a: 1 }, ['a']) > 1)
+  // 标题只覆盖查询的一半 → 加成小于全命中
+  assert.ok(titleBoost({ a: 1 }, ['a', 'b']) < titleBoost({ a: 1, b: 1 }, ['a', 'b']))
+})
+
+test('indexer(v0.7.0): 长文只沾一个高频词时，不得压过标题就讲这件事的短文（实测失真回归）', () => {
+  // 复刻 2026-09-23 实测：查"架构设计 三层记忆 实现细节"时《DSH 浏览器卡顿排查》排第一
+  const lag = {
+    docKey: 'l2:lag', layer: 'l2', id: 'lag', tags: [], kind: 'note', salience: 0.5, accesses: 0,
+    text: 'DSH 浏览器卡顿排查\n' + 'dsh 卡顿 插件 前端 性能 '.repeat(60),
+  }
+  const design = {
+    docKey: 'l2:design', layer: 'l2', id: 'design', tags: [], kind: 'note', salience: 0.5, accesses: 0,
+    text: '# dsh-plugin-memory-3t 架构设计：三层记忆 实现细节\nL2 笔记正文，说明 L1/L2/L3 的写入路径。',
+  }
+  const index = buildIndex([lag, design])
+  const result = searchIndex(index, 'dsh-plugin-memory-3t 架构设计 三层记忆 实现细节', 10)
+  assert.equal(result.l2[0].id, 'design', '标题命中 + 高覆盖率的短文应排第一')
+  assert.ok(result.l2[0].score > result.l2[1].score)
+})
+
+test('indexer(v0.7.0): schemaVersion=3 且旧快照判废', async () => {
+  assert.equal(INDEX_SCHEMA_VERSION, 3)
+  await withTmp(async (dir) => {
+    const idxPath = join(dir, 'index.json')
+    await writeFile(idxPath, JSON.stringify({ schemaVersion: 2, docCount: 1, avgDocLen: 1, docs: {}, postings: {} }))
+    const mgr = new IndexManager(idxPath, 50)
+    const idx = await mgr.get(async () => mkDocs(2))
+    assert.equal(idx.schemaVersion, 3)
+    assert.ok(idx.docs['l3:e0'].titleTf !== undefined, 'meta 应带 titleTf')
   })
 })

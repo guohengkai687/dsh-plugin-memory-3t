@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 冷启动 seed（v0.6.5）：**无 LLM** 地从仓库的确定性信号生成项目骨架。
  *
  * 借鉴 Hindsight 的"冷仓库自动建库"（git 历史 seed + codebase survey），但做了两点关键裁剪：
@@ -193,7 +193,7 @@ function buildSeedNote(signals: SeedSignals, skipped: string[], candidates: stri
     '',
     `# ${signals.manifest?.name !== undefined && signals.manifest.name !== '' ? signals.manifest.name : '项目'} 骨架`,
     '',
-    '> 由 `devmemory_seed` 从仓库的**确定性信号**生成（无 LLM）。这是**起点骨架而非完整认知**：',
+    '> 由 `devmemory_admin(op="seed")` 从仓库的**确定性信号**生成（无 LLM）。这是**起点骨架而非完整认知**：',
     '> 请用 `devmemory_remember` / `devmemory_note` 逐步补充真实结论，并删掉过时/无用的部分。',
     '',
   ]

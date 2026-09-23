@@ -19,7 +19,7 @@ export function loadMemorySkillContent(): string {
 export const MEMORY_SKILL_NAME = 'dev-memory'
 
 export const MEMORY_SKILL_DESCRIPTION =
-  '三层长期记忆协议：按层读写记忆（L1 会话流水 / L2 知识笔记 / L3 长期事实，库根 <工作区>/.memory/），执行 recall / remember / note / link / forget / consolidate，记忆库由 git 管理版本，支持 history / diff / restore 回溯，支持 diag 查看诊断与异常记录汇总（v0.4）；WebUI 面板与参数可在 DSH 设置「记忆管理」页管理（v0.5）。'
+  '三层长期记忆协议：按层读写记忆（L1 会话流水 / L2 知识笔记 / L3 长期事实，库根 <工作区>/.memory/），执行 recall / remember / note / consolidate，低频运维走 devmemory_admin（link / forget / history / diff / restore / diag / seed）；记忆库由 git 管理版本，可回溯；WebUI 面板与参数可在 DSH 设置「记忆管理」页管理（v0.5、v0.7）。'
 
 export const MEMORY_SKILL_WHEN_TO_USE =
   '用户提到旧事/偏好/决策、说"记住/忘掉/整理一下记忆"、需要检索项目历史或会话历史、会话收尾沉淀时。'

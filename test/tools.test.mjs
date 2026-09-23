@@ -3,27 +3,110 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createTools } from '../dist/tools.js'
+import { createTools, CORE_TOOL_NAMES, FULL_TOOL_NAMES } from '../dist/tools.js'
 import { MemoryStore } from '../dist/store.js'
 import { DigestEngine } from '../dist/digest.js'
-import { DEFAULT_CONFIG } from '../dist/config.js'
+import { DEFAULT_CONFIG, mergeConfig } from '../dist/config.js'
 
-const TOOL_NAMES = ['devmemory_status', 'devmemory_recall', 'devmemory_remember', 'devmemory_note', 'devmemory_link', 'devmemory_forget', 'devmemory_consolidate', 'devmemory_history', 'devmemory_diff', 'devmemory_restore', 'devmemory_diag', 'devmemory_seed']
+const TOOL_NAMES = [...FULL_TOOL_NAMES]
 const NAME_RE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/
+/** 近似 token（与 src/render.ts 同口径），用于 v0.7.0 的 schema 瘦身回归。 */
+function approxTokens(text) {
+  let cjk = 0, other = 0
+  for (const ch of String(text)) {
+    if (/[\u4e00-\u9fff]/.test(ch)) cjk += 1
+    else other += 1
+  }
+  return Math.ceil(cjk + other / 4)
+}
 
-test('tools: 12 个工具齐全且命名合法', async () => {
+test('tools(v0.7.0): core 面 = 5 高频 + 1 个 admin', async () => {
   const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools-'))
   try {
     const store = new MemoryStore(ws, DEFAULT_CONFIG)
     await store.init()
-    const tools = createTools(store, new DigestEngine(store))
-    assert.equal(tools.length, 12)
-    assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort())
+    const tools = createTools(store, new DigestEngine(store), { profile: 'core' })
+    assert.equal(tools.length, 6)
+    assert.deepEqual(tools.map((t) => t.name).sort(), [...CORE_TOOL_NAMES].sort())
     for (const tool of tools) assert.match(tool.name, NAME_RE)
+    // admin 的 op 覆盖全部 7 个低频动作
+    const admin = tools.find((t) => t.name === 'devmemory_admin')
+    assert.deepEqual(
+      [...admin.parameters.properties.op.enum].sort(),
+      ['diag', 'diff', 'forget', 'history', 'link', 'restore', 'seed'],
+    )
   } finally {
     await rm(ws, { recursive: true, force: true })
   }
 })
+
+test('tools(v0.7.0): full 面仍是 12 个独立工具（兼容 v0.6）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools-full-'))
+  try {
+    const store = new MemoryStore(ws, DEFAULT_CONFIG)
+    await store.init()
+    const tools = createTools(store, new DigestEngine(store), { profile: 'full' })
+    assert.equal(tools.length, 12)
+    assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort())
+  } finally {
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('tools(v0.7.0): core 面 schema 显著小于 full 面（瘦身回归）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools-size-'))
+  try {
+    const store = new MemoryStore(ws, DEFAULT_CONFIG)
+    await store.init()
+    const engine = new DigestEngine(store)
+    const size = (profile) =>
+      approxTokens(JSON.stringify(createTools(store, engine, { profile }).map((t) => ({
+        name: t.name, description: t.description, parameters: t.parameters,
+      }))))
+    const core = size('core')
+    const full = size('full')
+    // v0.6.6 实测（真实 DSH 请求头、同口径）= 2081 tokens/调用；core 目标 < 1000
+    assert.ok(core < full * 0.8, `core=${core} 应显著小于 full=${full}`)
+    assert.ok(core < 1000, `core 面 schema 应 < 1000 tokens，实测 ${core}`)
+  } finally {
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('tools(v0.7.0): admin 分发到各低频动作（link/forget/diag/seed/history）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools-admin-'))
+  try {
+    const store = new MemoryStore(ws, configNoVcs())
+    await store.init()
+    const tools = createTools(store, new DigestEngine(store), { profile: 'core' })
+    const admin = tools.find((t) => t.name === 'devmemory_admin')
+    // seed：冷启动骨架
+    const seeded = await admin.execute({ op: 'seed' }, {})
+    assert.ok(typeof seeded.relPath === 'string' && seeded.relPath.endsWith('.md'))
+    // remember + link + forget（demote）
+    const a = await tools.find((t) => t.name === 'devmemory_remember').execute({ kind: 'entity', content: '实体 A：记忆插件', tags: ['x'] }, {})
+    const b = await tools.find((t) => t.name === 'devmemory_remember').execute({ kind: 'entity', content: '实体 B：三层记忆', tags: ['y'] }, {})
+    const linked = await admin.execute({ op: 'link', a: a.id, b: b.id }, {})
+    assert.deepEqual(linked.aLinks, [b.id])
+    const demoted = await admin.execute({ op: 'forget', id: b.id, mode: 'demote', reason: '测试' }, {})
+    assert.equal(demoted.ok, true)
+    // diag / history
+    const diag = await admin.execute({ op: 'diag', action: 'summary' }, {})
+    assert.ok(diag !== undefined)
+    const history = await admin.execute({ op: 'history', limit: 3 }, {})
+    assert.ok(Array.isArray(history.commits))
+    // 未知 op 报错（不静默）
+    await assert.rejects(() => admin.execute({ op: 'nope' }, {}), /未知 op/)
+    await store.flushVcs('测试清理：等待自动提交完成')
+  } finally {
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+/** 关掉 vcs 的配置：admin 冒烟不需要 git，避免临时目录句柄竞争。 */
+function configNoVcs() {
+  return mergeConfig({ vcs: { enabled: false } })
+}
 
 test('tools: 每个工具 schema 为 object-rooted 且描述非空', async () => {
   const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools2-'))

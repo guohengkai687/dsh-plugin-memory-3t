@@ -1,4 +1,4 @@
-/**
+﻿/**
  * v0.2 git 版本回溯测试。
  *
  * - 纯逻辑单测：commit message 生成 / numstat 解析 / restore 目标展开。
@@ -294,7 +294,8 @@ test('vcs: 记忆库文件中无 .git 时 store 行为不变（v0.1 兼容：手
 test('vcs: 工具面冒烟（history/diff/restore 经 devmemory_* 工具真实调用）', skipNoGit, async () => {
   const { ws, store } = await makeStore()
   try {
-    const tools = createTools(store, new DigestEngine(store))
+    // v0.7.0：本用例按工具名逐一调用，显式用 full 暴露面
+    const tools = createTools(store, new DigestEngine(store), { profile: 'full' })
     const byName = (name) => tools.find((t) => t.name === name)
     await byName('devmemory_remember').execute({ kind: 'decision', content: '决策：v0.2 引入 git 回溯' }, {})
     await byName('devmemory_consolidate').execute({}, {})

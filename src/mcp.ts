@@ -57,7 +57,7 @@ import { resolve } from 'node:path'
 import { DEFAULT_CONFIG, mergeConfig, type Scope } from './config.js'
 import { DigestEngine } from './digest.js'
 import { MemoryStore } from './store.js'
-import { createTools, type ToolDefinition } from './tools.js'
+import { createTools, type ToolDefinition, type ToolsProfile } from './tools.js'
 
 /** 客户端未声明 protocolVersion 时的回退值（MCP 2025-06-18 修订版）。 */
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18'
@@ -90,6 +90,7 @@ const USAGE = `dev-memory-mcp —— 三层记忆库 MCP stdio 服务器（零�
   --no-vcs                  关闭 git 版本回溯
   --vcs-branch <name>       git 分支名（默认 main）
   --embedding               开启 Ollama 向量检索融合（默认关闭）
+  --tools <core|full>       工具暴露面（默认 full = 12 个独立工具；core = 5 高频 + 1 个 action 式 admin）
   -h, --help                显示本帮助
 
 环境变量：
@@ -110,6 +111,11 @@ interface CliOptions {
   vcsEnabled: boolean
   vcsBranch: string | undefined
   embeddingEnabled: boolean
+  /**
+   * 工具暴露面（v0.7.0）：默认 `full`——MCP 客户端看不到本插件的 boot 块与
+   * dev-memory skill，逐工具粒度更稳；想让对方模型少带 ~1.2k tokens/调用时开 `--tools=core`。
+   */
+  toolsProfile: ToolsProfile
   help: boolean
 }
 
@@ -129,6 +135,7 @@ function parseArgs(argv: string[]): ParseResult {
     vcsEnabled: true,
     vcsBranch: undefined,
     embeddingEnabled: false,
+    toolsProfile: 'full',
     help: false,
   }
   for (let i = 0; i < argv.length; i += 1) {
@@ -175,6 +182,12 @@ function parseArgs(argv: string[]): ParseResult {
       case '--embedding':
         options.embeddingEnabled = true
         break
+      case '--tools': {
+        const value = need(key)
+        if (value !== 'core' && value !== 'full') return { ok: false, message: '--tools 必须为 core 或 full' }
+        options.toolsProfile = value
+        break
+      }
       case '-h':
       case '--help':
         options.help = true
@@ -506,11 +519,12 @@ export async function main(argv: string[]): Promise<number> {
     return 1
   }
 
-  const tools = createTools(store, new DigestEngine(store))
+  const tools = createTools(store, new DigestEngine(store), { profile: options.toolsProfile })
   const serverInfo = { name: SERVER_NAME, version: await readVersion() }
   log(
     `已就绪：工作区根 ${workspaceRoot}，库根 ${store.root}，工具 ${tools.length} 个，` +
-      `vcs=${store.config.vcs.enabled ? 'on' : 'off'}，embedding=${store.config.embedding.enabled ? 'on' : 'off'}`,
+      `vcs=${store.config.vcs.enabled ? 'on' : 'off'}，embedding=${store.config.embedding.enabled ? 'on' : 'off'}，` +
+      `tools=${options.toolsProfile}`,
   )
   const code = await serve({ tools, serverInfo, store })
   // 兜底：极少数情况下仍有存活句柄（第三方 keep-alive 等）会拖住事件循环，

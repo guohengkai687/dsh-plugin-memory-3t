@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -65,7 +65,7 @@ test('lifecycle: apply 注册 skill/boot/工具/事件', async () => {
     assert.ok(bootText.includes('[dev-memory]'))
 
     // 工具 12 个（v0.6.5：+devmemory_seed）
-    assert.equal(calls.tools.length, 12)
+    assert.equal(calls.tools.length, 6)
 
     // 事件 4 类（v0.6.5 勘误：agent/session-start **真实存在**，且携带 source；agent/created 为兼容边）
     for (const event of ['agent/session-start', 'agent/created', 'agent/pre-step', 'agent/turn-stopping']) {
@@ -139,7 +139,7 @@ test('lifecycle: init 失败仍完成注册（fail-open）', async () => {
     await writeFile(broken, 'x')
     apply(ctx, { storageDir: broken, vcs: { enabled: false } })
     assert.equal(calls.skills.length, 1)
-    assert.equal(calls.tools.length, 12)
+    assert.equal(calls.tools.length, 6)
     // v0.6.4：workspace 自动解析不再在 apply 期急切建库 → 首个会话边（agent/created）才触达坏库根
     await calls.on.get('agent/created')({ agent: { id: 'i1' }, source: 'startup' })
     // 等异步 init 失败完成
@@ -244,7 +244,8 @@ test('lifecycle: subagent 继承父会话视图（L1 回放 / L3 top-k）', asyn
     process.chdir(ws)
     const { ctx, calls } = makeStubContext()
     // v0.6.6：L3 默认不注入（off），本用例校验"显式开启 + subagent 继承"路径
-    apply(ctx, { storageDir: '.memory', vcs: { enabled: false }, l3Inject: 'salience' })
+    // v0.7.0：subagent 继承注入改为显式开启（subagentInject: true），默认已改为不注入
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false }, l3Inject: 'salience', subagentInject: true })
     await settle()
 
     // 手工种一条高活跃 L3（模拟已积累的记忆）
@@ -575,6 +576,157 @@ test('lifecycle(v0.6.6): maxViewTokens 全局兜底（任何块单独预算再�
     const total = view.content.map((block) => block.text).join('\n')
     const { approximateTokens } = await import('../dist/render.js')
     assert.ok(approximateTokens(total) <= 140, '视图总量应被 maxViewTokens 压住，实测 ' + approximateTokens(total))
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle(v0.7.0): subagent 默认不注入视图/提醒（工具仍在）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-subskip-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+
+    // 种一条 L1 流水，保证父会话一定有内容可注入
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const runtimeDir = join(ws, '.memory', 'runtime')
+    await mkdir(runtimeDir, { recursive: true })
+    const now = new Date()
+    const name = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.md`
+    await writeFile(join(runtimeDir, name), [`# ${name.slice(0, -3)}`, '', '- user: 昨天的跨会话流水'].join('\n') + '\n')
+
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const parent = { id: 'p9' }
+    await created({ agent: parent, source: 'startup' })
+    const sub = { id: 's9', session: { header: { parentSession: 'p9' } } }
+    await created({ agent: sub, source: 'resume' })
+
+    const next = async () => ({ kind: 'enter', messages: [] })
+    const ask = (agent, id) => ({ agent, messages: [{ id, role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 })
+    const pluginMsgs = (out) => (out.messages ?? []).filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+
+    const outParent = await preStep(ask(parent, 'sp1'), next)
+    assert.equal(pluginMsgs(outParent).length, 1, '父会话仍注入视图')
+
+    const outSub = await preStep(ask(sub, 'ss1'), next)
+    assert.equal(pluginMsgs(outSub).length, 0, 'subagent 默认不得注入视图/提醒')
+    // 记忆工具对 subagent 依然可用（"自动喂"改成"按需取"）
+    assert.ok(calls.tools.some((t) => t.name === 'devmemory_recall'), 'subagent 仍应能调用记忆工具')
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle(v0.7.0): L1 回放逐行摘要 + 整行截断（不切半句）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-l1sum-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false }, l1MaxCharsPerLine: 40, maxRuntimeTokens: 100 })
+    await settle()
+
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const runtimeDir = join(ws, '.memory', 'runtime')
+    await mkdir(runtimeDir, { recursive: true })
+    const now = new Date()
+    const name = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.md`
+    const long = '甲'.repeat(300)
+    await writeFile(
+      join(runtimeDir, name),
+      [`# ${name.slice(0, -3)}`, '', `- user: ${long}`, '- user: 短行保留', ...Array.from({ length: 40 }, (_, i) => `- user: 填充行${i}`)].join('\n') + '\n',
+    )
+
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const agent = { id: 'l1s' }
+    await created({ agent, source: 'startup' })
+    const next = async () => ({ kind: 'enter', messages: [] })
+    const out = await preStep(
+      { agent, messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: '不同内容，避免被去重' }] }], turn: 1, step: 1 },
+      next,
+    )
+    const view = out.messages.find((m) => m?.source?.form === 'recall')
+    assert.ok(view !== undefined, '应注入会话视图')
+    const text = view.content.map((b) => b.text).join('\n')
+    // 单行摘要：300 字正文被截到 40 字 + …
+    assert.ok(!text.includes('甲'.repeat(60)), '长行应被摘要，不得整段进上下文')
+    assert.ok(text.includes(`${'甲'.repeat(40)}…`), '摘要应以 … 结尾')
+    // 整行截断：超预算时给出省略标记，且不出现被切半句的行
+    assert.ok(text.includes('已按预算省略'), '超预算应按整行省略并标注')
+    for (const line of text.split('\n')) {
+      if (line.startsWith('- ') && line.includes('填充行')) continue
+      assert.ok(!/^-\s*user:\s*\S*$/.test(line) || line.length > 8, '不得出现被截断成半句的流水行')
+    }
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+test('lifecycle(v0.7.0): pre-step 早于启动边也注入一次（headless 时序回归）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-order-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const runtimeDir = join(ws, '.memory', 'runtime')
+    await mkdir(runtimeDir, { recursive: true })
+    const now = new Date()
+    const name = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}.md`
+    await writeFile(join(runtimeDir, name), [`# ${name.slice(0, -3)}`, '', '- user: 跨会话流水应被回放'].join('\n') + '\n')
+
+    const created = calls.on.get('agent/created')
+    const preStep = calls.on.get('agent/pre-step')
+    const next = async () => ({ kind: 'enter', messages: [] })
+    const ask = (agent, id) => ({ agent, messages: [{ id, role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 })
+    const pluginMsgs = (out) => (out.messages ?? []).filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+
+    // headless 实测顺序：pre-step 先到，agent/created / session-start 后到
+    const agent = { id: 'ord1', session: { header: { cwd: ws } } }
+    const first = await preStep(ask(agent, 'o1'), next)
+    assert.equal(pluginMsgs(first).length, 1, '启动边未到时，pre-step 应就地装载并注入一次')
+    await created({ agent, source: 'startup' })
+    await calls.on.get('agent/session-start')({ agent, source: 'startup' })
+    // 启动边之后不得重复注入（keepInjected 保留已注入标记）
+    const again = await preStep(ask(agent, 'o2'), next)
+    assert.equal(pluginMsgs(again).length, 0, '启动边补齐后不得重复注入')
+  } finally {
+    process.chdir(cwd)
+    await settle()
+    await rm(ws, { recursive: true, force: true })
+  }
+})
+
+test('lifecycle(v0.7.0): parentSession 为空串按根会话处理（不得误判 subagent）', async () => {
+  const ws = await mkdtemp(join(tmpdir(), 'dm3t-empty-parent-'))
+  const cwd = process.cwd()
+  try {
+    process.chdir(ws)
+    const { ctx, calls } = makeStubContext()
+    apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
+    await settle()
+    const preStep = calls.on.get('agent/pre-step')
+    const next = async () => ({ kind: 'enter', messages: [] })
+    const agent = { id: 'ep1', session: { header: { cwd: ws, parentSession: '' } } }
+    const out = await preStep(
+      { agent, messages: [{ id: 'e1', role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 },
+      next,
+    )
+    const injected = (out.messages ?? []).filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+    assert.equal(injected.length, 1, '空串 parentSession 是根会话，必须照常注入')
   } finally {
     process.chdir(cwd)
     await settle()
