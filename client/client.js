@@ -10,17 +10,26 @@ window.__ModuleLoader__.load({
 		/**
 		* 服务端与客户端 bundle 共享的纯常量（零依赖，可被浏览器 bundle 内联）。
 		*/
+		/** 客户端 i18n 字典命名空间（本插件自有，与宿主设置命名空间无关）。 */
 		const DEV_MEMORY_SETTINGS_NS = "dev-memory";
+		/**
+		* DSH 设置表单的命名空间 = profile 条目 id（cordis.patch.yml 的 `id:`）。
+		* 服务端 `Config`（volatile 字段）与客户端 `ctx.configForms.get(...)` 都用它。
+		*/
+		const DEV_MEMORY_ENTRY_ID = "dsh-plugin-memory-3t";
 		//#endregion
 		//#region src/client/form.tsx
 		/**
-		* 「记忆管理」表单核心：在 settings scope 之上做 staged 编辑（草稿 → 保存）。
+		* 「记忆管理」表单核心：在宿主配置表单（DSH 0.1.7 `ctx.configForms`）之上做 staged 编辑
+		* （草稿 → 保存）。
 		*
-		* - scope：ctx.settingsScope.bind({ namespace: 'dev-memory' })（Host 文档读写）。
+		* - form：ctx.configForms.get('dsh-plugin-memory-3t')（宿主 profile 条目的设置文档读写；
+		*   0.1.1 的 ctx.settingsScope 已随旧设置体系移除）。
 		* - 字段分两类：组字段（值在 snapshot.value[group][key]，保存时整体写回该组对象，
 		*   保留同组其它已生效字段）与标量字段（snapshot.value[key]）。
-		* - 保存 = 逐草稿 scope.set(fieldOrGroup, value)；丢弃 = 只清草稿不写。
-		*   组字段写回的是"解析值"（含 base 层），不会误删用户层以外的继承字段。
+		* - 保存 = 逐草稿 form.set(fieldOrGroup, value)；丢弃 = 只清草稿不写。
+		*   组字段写回的是"解析值"（含 base 层），不会误删用户层以外的继承字段；
+		*   宿主端写入持久化到 profile 的 cordis.patch.yml，volatile 字段不重挂载即生效。
 		* - 纯注入样式（无 CSS 文件），随设置对话框外壳主题走。
 		*/
 		const style$1 = {
@@ -142,13 +151,13 @@ window.__ModuleLoader__.load({
 				default: return "groupDigestRecall";
 			}
 		}
-		function DevMemoryForm({ scope, t, fields, compact = false, onDirtyChange }) {
-			const [snap, setSnap] = (0, react.useState)(() => scope.getSnapshot());
+		function DevMemoryForm({ form, t, fields, compact = false, onDirtyChange }) {
+			const [snap, setSnap] = (0, react.useState)(() => form.getSnapshot());
 			const [drafts, setDrafts] = (0, react.useState)({});
 			const [saving, setSaving] = (0, react.useState)(false);
 			const [error, setError] = (0, react.useState)(null);
 			const [saved, setSaved] = (0, react.useState)(false);
-			(0, react.useEffect)(() => scope.subscribe(() => setSnap(scope.getSnapshot())), [scope]);
+			(0, react.useEffect)(() => form.subscribe(() => setSnap(form.getSnapshot())), [form]);
 			const dirty = Object.keys(drafts).length > 0;
 			(0, react.useEffect)(() => onDirtyChange?.(dirty), [onDirtyChange, dirty]);
 			/** 展示态 = 生效值叠加草稿（组草稿是完整组对象，直接覆盖）。 */
@@ -193,7 +202,7 @@ window.__ModuleLoader__.load({
 				setSaving(true);
 				setError(null);
 				try {
-					for (const [key, value] of entries) await scope.set(key, value);
+					for (const [key, value] of entries) if (await form.set(key, value) === false) throw new Error(t("saveFailed"));
 					setDrafts({});
 					setSaved(true);
 					window.setTimeout(() => setSaved(false), 2500);
@@ -564,7 +573,7 @@ window.__ModuleLoader__.load({
 				color: "var(--dsw-alias-label-tertiary)"
 			}
 		};
-		function DevMemorySection({ t, scope }) {
+		function DevMemorySection({ t, form }) {
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				style: style.wrap,
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -580,7 +589,7 @@ window.__ModuleLoader__.load({
 						children: t("openPanelHint")
 					})]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DevMemoryForm, {
-					scope,
+					form,
 					t,
 					fields: SECTION_FIELDS
 				})]
@@ -625,7 +634,7 @@ window.__ModuleLoader__.load({
 			l3InjectSalience: "按 salience 取 top-5",
 			l3InjectQuery: "按会话首条消息检索",
 			groupSeed: "冷启动 seed（项目骨架）",
-			seedEnabled: "启用 devmemory_seed 工具",
+			seedEnabled: "启用冷启动 seed 能力",
 			seedEnabledHint: "库为空时由模型调用，从 git 历史 / package.json / README / 顶层结构生成项目骨架（无 LLM、零成本）。",
 			seedAuto: "库为空时自动 seed 一次",
 			seedAutoHint: "开启即复刻 Hindsight 的\"零配置开箱\"；默认关——写库是显式动作，由 skill 引导模型按需调用。下一次会话启动生效。",
@@ -656,7 +665,7 @@ window.__ModuleLoader__.load({
 			saveFailed: "保存失败，请重试",
 			readOnly: "当前设置文档只读（进程内 memory 模式），请重启后再改。",
 			loading: "加载中…",
-			unavailable: "设置命名空间不可用（服务端设置桥未激活）。"
+			unavailable: "设置表单不可用：宿主未挂载本插件条目，或当前 profile 没有设置服务。"
 		};
 		const en = {
 			nav: "Memory",
@@ -695,7 +704,7 @@ window.__ModuleLoader__.load({
 			l3InjectSalience: "Top-5 by salience",
 			l3InjectQuery: "Retrieve by first message",
 			groupSeed: "Cold-start seed (project skeleton)",
-			seedEnabled: "Enable the devmemory_seed tool",
+			seedEnabled: "Enable cold-start seeding",
 			seedEnabledHint: "Lets the model generate a project skeleton from git history / package.json / README / top-level layout. No LLM, zero cost.",
 			seedAuto: "Auto-seed when the library is empty",
 			seedAutoHint: "Turn on to mimic Hindsight’s zero-setup behaviour. Off by default — writing is explicit, driven by the skill. Takes effect on the next session start.",
@@ -726,7 +735,7 @@ window.__ModuleLoader__.load({
 			saveFailed: "Save failed, retry",
 			readOnly: "Settings document is read-only (in-process memory mode); restart to edit.",
 			loading: "Loading…",
-			unavailable: "Settings namespace unavailable (server bridge inactive)."
+			unavailable: "Settings form unavailable: the Host does not mount this plugin entry, or this profile has no settings service."
 		};
 		//#endregion
 		//#region src/client/index.tsx
@@ -735,10 +744,11 @@ window.__ModuleLoader__.load({
 		/** settings.section 导航顺序：默认 General/Models 之后、插件市场(40)之后。 */
 		const SECTION_ORDER = 46;
 		const name = PLUGIN_ID;
+		/** 依赖的客户端服务（0.1.7：`configForms` 取代 `settingsScope`）。 */
 		const inject = [
 			"slots",
 			"locale",
-			"settingsScope"
+			"configForms"
 		];
 		function apply(ctx) {
 			const NS = DEV_MEMORY_SETTINGS_NS;
@@ -747,8 +757,8 @@ window.__ModuleLoader__.load({
 				zh,
 				en
 			}), `${PLUGIN_ID}: settings dictionaries`);
-			const scope = ctx.settingsScope.bind({ namespace: NS });
-			ctx.slots.inject("settings.section", () => ctx.slots.register({
+			const form = ctx.configForms.get(DEV_MEMORY_ENTRY_ID);
+			ctx.effect(() => ctx.configForms.whileServed([DEV_MEMORY_ENTRY_ID], () => ctx.slots.inject("settings.section", () => ctx.slots.register({
 				name: "settings.section",
 				id: PLUGIN_ID,
 				order: SECTION_ORDER,
@@ -756,8 +766,8 @@ window.__ModuleLoader__.load({
 				locale: NS
 			}, (() => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DevMemorySection, {
 				t,
-				scope
-			}))));
+				form
+			}))))), `${PLUGIN_ID}: settings section`);
 		}
 		//#endregion
 		exports.apply = apply;

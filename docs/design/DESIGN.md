@@ -368,12 +368,13 @@ export function apply(ctx: Context, config: Config) {
 
 > 该清单为设计基线；截止 v0.5 的增量：`vcs.ts`（git 回溯）、`pack.ts`/`cli.ts`/`bin/`（打包迁移）、
 > `nudge.ts`（recallNudge）、`webui.ts`（只读面板）、`diag.ts`（诊断与异常记录）、`render.ts`（boot/回放渲染）、`skill.ts`（协议加载）、
-> `settings.ts`（v0.5 设置桥：schema + installSettingsSection + applyEffective）、`client/`（v0.5 浏览器 bundle：设置页/卡片/表单/locales）。
-> 工具面 11 个（v0.1 的 7 个 + history/diff/restore + diag）。设计档案统一收在 `docs/design/`。
+> `settings.ts`（设置桥：`applyEffective` + volatile 桥）、`client/`（浏览器 bundle：设置页/表单/locales/contract）。
+> 工具面：默认 core 6 个（v0.7.0：5 高频 + 1 个 action 式 admin），`toolsProfile: full` 为 12 个独立工具。设计档案统一收在 `docs/design/`。
+> v0.7.x 的机制变更见文末附录 C。
 
 ```
 dsh-plugin-memory-3t/
-├── package.json            # name: dsh-plugin-memory-3t, MIT, 零 runtime deps, peers: @deepseek-ai/cordis 等
+├── package.json            # name: dsh-plugin-memory-3t, MIT, 无第三方运行时依赖, peers: @deepseek-ai/schemastery + @deepseek-ai/cosmokit
 ├── cordis.patch.yml        # 按 DSH 约定 bundle patch（- insert 插件条目）
 ├── src/
 │   ├── index.ts            # 入口（生命周期接线：agent/created（库根绑定+视图+继承）/pre-step/turn-stopping + 设置桥接线）
@@ -386,18 +387,19 @@ dsh-plugin-memory-3t/
 │   ├── nudge.ts            # recallNudge 调度（30–240min 随机 + followup，默认关；setEnabled 运行时切换）
 │   ├── diag.ts             # 诊断与异常记录（v0.4，<库>/diag/events.jsonl + 汇总/明细/清空；updateConfig live）
 │   ├── webui.ts            # 只读面板：/dev-memory 路由 + 静态页 + JSON API（v0.5 返回 disposer + webui.enabled 开关）
-│   ├── settings.ts         # 设置桥（v0.5）：schema + installSettingsSection + applyEffective（live 生效、启动期绑定边界）
-│   ├── shared.ts           # 服务端/客户端共享纯常量（设置 namespace）
+│   ├── settings.ts         # 设置桥：applyEffective（live 原地更新）+ volatile 桥（监听 loader/volatile-update）+ auto:false 页面策略
+│   ├── shared.ts           # 服务端/客户端共享纯常量（i18n namespace / 设置条目 id / PLUGIN_VERSION）
 │   ├── digest.ts           # 沉淀流程
-│   ├── tools.ts            # 11 个 devmemory_* 工具
+│   ├── tools.ts            # devmemory_* 工具（core 6 个 / full 12 个）
 │   ├── config.ts           # 三档 token 预算 + scope + 开关 + webui 组（远少于 57 项）
 │   ├── render.ts           # boot 块 / L1 回放 / L3 top-k 渲染与 token 钳制
 │   ├── paths.ts            # 库根解析（workspace/user 基准）+ 防逃逸拼接
 │   └── frontmatter.ts      # L3 条目 frontmatter 解析/序列化
-├── src/client/             # v0.5 浏览器 bundle 源码（tsdown → client/client.js）
-│   ├── index.tsx           # 客户端插件：settings.section 独立设置页（v0.5.3 起参数唯一编辑面，不再注册 settings.plugin.item 卡片）
+├── src/client/             # 浏览器 bundle 源码（tsdown → client/client.js）
+│   ├── index.tsx           # 客户端插件：configForms.get(条目 id) + whileServed → settings.section 独立设置页
 │   ├── section.tsx         # 设置页（v0.5.4 起纯参数面：打开面板入口 + 完整表单，状态卡已移除）
-│   ├── form.tsx            # staged 编辑表单核心（组/标量字段，scope.set/unset）
+│   ├── form.tsx            # staged 编辑表单核心（组/标量字段，form.set）
+│   ├── contract.ts         # 浏览器侧最小契约（ConfigForm/ConfigFormSnapshot/slots/locale，编译期擦除）
 │   └── locales.ts          # zh/en 文案
 ├── client/                 # 构建产物（client.js + map，__ModuleLoader__ 工厂，仅外部化 react）
 ├── skills/dev-memory.md    # skill 协议正文（设计草案见 docs/design/skill.dev-memory.md）
@@ -407,3 +409,33 @@ dsh-plugin-memory-3t/
 ├── test/                   # node --test 单测（测 dist 产物；真实 git 集成需要放开沙箱）
 └── README.md               # 中文文档（安装/配置/使用/限制/路线图）
 ```
+
+## 附录 C：v0.7.x 机制变更（DSH 0.1.7 适配）
+
+DSH 0.1.7-rc.1 同时改了三处对外契约，插件在 v0.7.1–v0.7.4 逐项迁移。下面是"旧契约 → 新契约"的对照与落点。
+
+| 契约 | 0.1.1 时代（旧） | 0.1.7 起（现） | 落点 |
+|---|---|---|---|
+| 设置字段声明 | `@deepseek-ai/dsh-settings` 的 `installSettingsSection(ctx, ns, schema, entry, hooks)` 注册 namespace | 插件导出 schemastery `Config`，live 字段标 `.volatile()`；`ctx.settings` 按 **profile 条目 id** 投影 volatile 字段 | `src/config.ts`（schema）、`src/settings.ts`（桥） |
+| 表单读写 | 客户端 `ctx.settingsScope.bind({ namespace })` | 客户端 `ctx.configForms.get(条目 id)`（`getSnapshot/subscribe/set`）+ `whileServed([id])` 按宿主是否服务该 namespace 挂/摘页面 | `src/client/index.tsx`、`form.tsx`、`contract.ts` |
+| 写入落点 | Host 设置文档（settings.yaml 用户层） | **profile 的 `cordis.patch.yml`**（`ctx.settings.update/replace/mutate`） | 无需插件代码，DSH `config-editor` |
+| live 生效 | `onChange` 回调给一份完整有效配置 | loader 把新值提交进 volatile 引用 + 向插件 fiber 派发 `loader/volatile-update`；插件重新解引用并 `applyEffective` 原地更新 | `src/settings.ts`、`src/config.ts`（`isVolatile` 解引用） |
+| 自动页面 | 无此概念 | 自带页面需 `child.settings.configure({ auto: false }, ctx.fiber)` 抑制宿主按 schema 生成的重复页 | `src/index.ts` → `installSettingsPresentationPolicy` |
+| 消息来源 | `source: { kind: 'plugin', plugin: '<包名>' }` | **生产者自有 kind**：`plugin:<包名>`（v3→v4 迁移对旧日志的同一推导）；`kind` 非空且 ≠ 字面量 `plugin` | `src/index.ts`（`PRODUCER_SOURCE_KIND`） |
+| 版本可观测 | 无 | `apply` 自报 `[dev-memory] vX loaded (...)`：loader 按 URL 缓存 ESM 模块，重装不重启进程会继续跑旧模块 | `src/shared.ts`（`PLUGIN_VERSION`） |
+
+### meta.json（v0.7.4，schemaVersion 2）
+
+v1 把"创建时那个环境"的两样东西写死进了库文件：**绝对库根**与**一份配置快照**。库本身是按工作区/.git
+版本化、可 pack 迁移、可跨机器拷贝的，于是这两项在任何一次迁移后都变成假信息（实测残留
+`/home/kiki/dsh work space/.memory`）。v2 的分工是：
+
+| 类别 | 字段 | 性质 |
+|---|---|---|
+| 库身份（环境无关） | `identity.storageDir`、`identity.scope` | 跨机器/跨平台可移植；库根永远由运行时 `workspace 根 + storageDir` 解析 |
+| 库自身状态 | `createdAt`、`digest`、`counters` | 属于库，迁移时保留 |
+| 打开环境（诊断） | `lastOpen.{at,root,platform,node}` | 每次打开刷新；**不是权威来源**，只用于"这份库最近被谁在哪打开过" |
+| 写入者 | `pluginVersion`、`updatedAt` | 每次 `writeMeta` 刷新 `updatedAt`；插件版本变化时刷新一次 |
+
+迁移与写盘策略：v1/损坏/首次 → 立刻以 v2 落盘（覆盖旧字段）；已是 v2 且环境身份未变 → **不写**
+（记忆库由 git 版本化，无意义的改动会污染它的历史）。库被搬到新路径后，下一次打开即刷新 `lastOpen`。

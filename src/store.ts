@@ -28,6 +28,7 @@ import {
   type RecallResult,
 } from './indexer.js'
 import { layerDirs, resolveRoot, runtimeFileName, safeJoin } from './paths.js'
+import { PLUGIN_VERSION } from './shared.js'
 import { GitVcs, type VcsStatus } from './vcs.js'
 
 export type EntryKind = 'preference' | 'decision' | 'entity' | 'context'
@@ -60,13 +61,64 @@ export interface DigestState {
   lastError: string | null
 }
 
+/**
+ * meta.json（v0.7.4 起 schemaVersion 2）：只描述**库自身的身份与状态**，
+ * 不再是"某个运行环境的快照"。
+ *
+ * v1 的两处环境相关字段已删除：
+ * - `root`：创建时写死的绝对库根——库随工作区/机器/平台移动后必然失真（实测残留过
+ *   WSL 路径 `/home/kiki/dsh work space/.memory`），而且没有任何代码读它；
+ * - `config`：一份写死在文件里的配置快照——与运行中的 entry 配置无关，只是过期副本
+ *   （旧的 0.1.x 快照里连 l1MaxCharsPerLine/subagentInject/toolsProfile 都没有）。
+ *
+ * v2 只留三类内容：
+ * - **环境无关的库身份**：identity（storageDir + scope，跨机器/跨平台可移植）；
+ * - **库自身状态**：createdAt / digest / counters；
+ * - **一条每次打开都刷新的诊断字段** lastOpen（最近一次是谁在哪个平台打开了它），
+ *   它不是权威来源——库的位置永远由运行时的 workspace 根 + storageDir 解析。
+ */
 export interface MetaFile {
-  schemaVersion: 1
-  root: string
+  schemaVersion: 2
   createdAt: string
-  config: Config
+  /** 最近一次持久化时间（每次 writeMeta 刷新）。 */
+  updatedAt: string
+  /** 最近一次打开本库的插件版本（升级后刷新一次：这份库最近被哪个版本碰过）。 */
+  pluginVersion: string
+  /** 环境无关的库身份：存储目录 + 粒度。 */
+  identity: { storageDir: string; scope: Config['scope'] }
+  /** 最近一次打开本库的运行环境（诊断用，每次打开刷新；不是权威来源）。 */
+  lastOpen: { at: string; root: string; platform: string; node: string }
   digest: DigestState
   counters: Record<string, number>
+}
+
+/** v1 文件（已退役）：只用于迁移 createdAt / digest / counters，其余字段一律丢弃。 */
+interface MetaFileV1 {
+  schemaVersion?: unknown
+  createdAt?: unknown
+  digest?: unknown
+  counters?: unknown
+}
+
+/** 归一化历史文件里的 digest 状态（缺字段补默认值）。 */
+function normalizeDigestState(value: unknown): DigestState {
+  const raw = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
+  return {
+    lastRunAt: typeof raw.lastRunAt === 'string' ? raw.lastRunAt : null,
+    pending: raw.pending === true,
+    retries: typeof raw.retries === 'number' && Number.isFinite(raw.retries) ? raw.retries : 0,
+    lastError: typeof raw.lastError === 'string' ? raw.lastError : null,
+  }
+}
+
+/** 归一化历史文件里的计数器（只保留有限数值）。 */
+function normalizeCounters(value: unknown): Record<string, number> {
+  if (typeof value !== 'object' || value === null) return {}
+  const out: Record<string, number> = {}
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item === 'number' && Number.isFinite(item)) out[key] = item
+  }
+  return out
 }
 
 export interface StoreStatusSnapshot {
@@ -303,30 +355,47 @@ export class MemoryStore {
 
   private async loadMeta(): Promise<void> {
     const path = safeJoin(this.root, 'meta.json')
+    let previous: MetaFileV1 | null = null
     try {
-      const raw = await readFile(path, 'utf8')
-      const parsed = JSON.parse(raw) as MetaFile
-      if (parsed.schemaVersion === 1 && typeof parsed.root === 'string') {
-        this.meta = { ...parsed, config: { ...this.config, ...parsed.config } }
-        return
-      }
+      previous = JSON.parse(await readFile(path, 'utf8')) as MetaFileV1
     } catch {
-      /* 缺失或损坏 → 重建 */
+      /* 缺失或损坏 → 按新建处理 */
     }
     const now = new Date().toISOString()
-    this.meta = {
-      schemaVersion: 1,
-      root: this.root,
-      createdAt: now,
-      config: this.config,
-      digest: { lastRunAt: null, pending: false, retries: 0, lastError: null },
-      counters: {},
+    const meta: MetaFile = {
+      schemaVersion: 2,
+      createdAt: typeof previous?.createdAt === 'string' ? previous.createdAt : now,
+      updatedAt: now,
+      pluginVersion: PLUGIN_VERSION,
+      identity: { storageDir: this.config.storageDir, scope: this.config.scope },
+      lastOpen: { at: now, root: this.root, platform: process.platform, node: process.versions.node },
+      digest: normalizeDigestState(previous?.digest),
+      counters: normalizeCounters(previous?.counters),
     }
-    await this.writeMeta()
+    this.meta = meta
+    // v1（或首次/损坏）→ 立刻以 v2 落盘，把旧的绝对库根与配置副本覆盖掉；
+    // 已是 v2 时只在"环境身份变了"（库被移动 / 换平台 / 插件升级）才重写——
+    // 记忆库本身由 git 版本化，无意义的改动会污染它的历史。
+    if (this.metaNeedsWrite(previous, meta)) await this.writeMeta()
+  }
+
+  /** 是否需要把 v2 形态写回磁盘：首次 / 仍是 v1 / 环境身份变化。 */
+  private metaNeedsWrite(previous: MetaFileV1 | null, meta: MetaFile): boolean {
+    if (previous === null || previous.schemaVersion !== 2) return true
+    const onDisk = previous as unknown as Partial<MetaFile>
+    return (
+      onDisk.pluginVersion !== meta.pluginVersion ||
+      onDisk.identity?.storageDir !== meta.identity.storageDir ||
+      onDisk.identity?.scope !== meta.identity.scope ||
+      onDisk.lastOpen?.root !== meta.lastOpen.root ||
+      onDisk.lastOpen?.platform !== meta.lastOpen.platform ||
+      onDisk.lastOpen?.node !== meta.lastOpen.node
+    )
   }
 
   private async writeMeta(): Promise<void> {
     if (this.meta === null) return
+    this.meta.updatedAt = new Date().toISOString()
     await writeFile(safeJoin(this.root, 'meta.json'), JSON.stringify(this.meta, null, 2), { mode: 0o600 })
   }
 

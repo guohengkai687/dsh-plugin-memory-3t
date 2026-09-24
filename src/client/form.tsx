@@ -1,17 +1,20 @@
 /**
- * 「记忆管理」表单核心：在 settings scope 之上做 staged 编辑（草稿 → 保存）。
+ * 「记忆管理」表单核心：在宿主配置表单（DSH 0.1.7 `ctx.configForms`）之上做 staged 编辑
+ * （草稿 → 保存）。
  *
- * - scope：ctx.settingsScope.bind({ namespace: 'dev-memory' })（Host 文档读写）。
+ * - form：ctx.configForms.get('dsh-plugin-memory-3t')（宿主 profile 条目的设置文档读写；
+ *   0.1.1 的 ctx.settingsScope 已随旧设置体系移除）。
  * - 字段分两类：组字段（值在 snapshot.value[group][key]，保存时整体写回该组对象，
  *   保留同组其它已生效字段）与标量字段（snapshot.value[key]）。
- * - 保存 = 逐草稿 scope.set(fieldOrGroup, value)；丢弃 = 只清草稿不写。
- *   组字段写回的是"解析值"（含 base 层），不会误删用户层以外的继承字段。
+ * - 保存 = 逐草稿 form.set(fieldOrGroup, value)；丢弃 = 只清草稿不写。
+ *   组字段写回的是"解析值"（含 base 层），不会误删用户层以外的继承字段；
+ *   宿主端写入持久化到 profile 的 cordis.patch.yml，volatile 字段不重挂载即生效。
  * - 纯注入样式（无 CSS 文件），随设置对话框外壳主题走。
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 
+import type { ConfigForm, ConfigFormSnapshot } from './contract.js'
 import type { LocaleKey } from './locales.js'
 
 /** 布尔开关字段。 */
@@ -50,7 +53,7 @@ export interface SelectField {
 export type Field = ToggleField | NumberField | SelectField
 
 export interface DevMemoryFormProps {
-  scope: SettingsScope<Record<string, unknown>>
+  form: ConfigForm<Record<string, unknown>>
   /** locale bind：key → 当前语言文案。 */
   t: (key: LocaleKey) => string
   fields: Field[]
@@ -96,7 +99,7 @@ const style = {
   disabled: { opacity: 0.4, cursor: 'default' },
 } as const
 
-function groupOf(snap: SettingsScopeSnapshot<Record<string, unknown>>, group: string): Record<string, unknown> {
+function groupOf(snap: ConfigFormSnapshot<Record<string, unknown>>, group: string): Record<string, unknown> {
   const v = snap.value?.[group]
   return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
 }
@@ -113,14 +116,14 @@ function groupLabel(group: string): LocaleKey {
   }
 }
 
-export function DevMemoryForm({ scope, t, fields, compact = false, onDirtyChange }: DevMemoryFormProps) {
-  const [snap, setSnap] = useState<SettingsScopeSnapshot<Record<string, unknown>>>(() => scope.getSnapshot())
+export function DevMemoryForm({ form, t, fields, compact = false, onDirtyChange }: DevMemoryFormProps) {
+  const [snap, setSnap] = useState<ConfigFormSnapshot<Record<string, unknown>>>(() => form.getSnapshot())
   const [drafts, setDrafts] = useState<Record<string, unknown>>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
-  useEffect(() => scope.subscribe(() => setSnap(scope.getSnapshot())), [scope])
+  useEffect(() => form.subscribe(() => setSnap(form.getSnapshot())), [form])
 
   const dirty = Object.keys(drafts).length > 0
 
@@ -162,7 +165,8 @@ export function DevMemoryForm({ scope, t, fields, compact = false, onDirtyChange
     setError(null)
     try {
       for (const [key, value] of entries) {
-        await scope.set(key, value)
+        // set 返回 false = 宿主拒绝（版本冲突 / 字段非 volatile / 被更高配置层覆盖）。
+        if ((await form.set(key, value)) === false) throw new Error(t('saveFailed'))
       }
       setDrafts({})
       setSaved(true)

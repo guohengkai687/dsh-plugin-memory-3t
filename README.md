@@ -1,6 +1,6 @@
 # dsh-plugin-memory-3t
 
-本地三层记忆插件（DSH），零运行时依赖、无外部服务。
+本地三层记忆插件（DSH），无外部服务；运行时只依赖宿主自带的 `@deepseek-ai/schemastery` 与 `@deepseek-ai/cosmokit`（peerDependencies），不引入任何第三方库。
 
 > **L1 会话流水**（`runtime/`）· **L2 知识笔记**（`docs/`）· **L3 长期事实**（`spaces/`）
 > 插件管机制（何时写 / 注入多少 / 检索多快 / 多安全），内嵌 skill `dev-memory` 管协议（模型该不该查、写什么、用什么格式）。协议可被项目级 `.dsh/skills/dev-memory/SKILL.md` 覆盖。
@@ -22,7 +22,9 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 # 3. 重启 DSH 会话。记忆库默认建在会话工作区的 .memory/ 目录
 ```
 
-安装后不需要任何手工初始化：首次会话自动建库，模型通过 12 个 `devmemory_*` 工具与 `dev-memory` skill 使用记忆。
+安装后不需要任何手工初始化：首次会话自动建库，模型通过 `devmemory_*` 工具（默认 `toolsProfile: core` = 5 个高频 + 1 个 action 式 admin；`full` = v0.6 的 12 个独立工具）与 `dev-memory` skill 使用记忆。
+
+> ⚠ **装完必须重启 `dsh web` 进程**：DSH loader 按 URL 缓存 ESM 模块，重装插件后不重启进程，运行中的仍是旧模块（磁盘新、内存旧）。0.7.3 起 `apply` 会自报版本 `[dev-memory] vX loaded (...)`，看到它即确认新代码在位。
 
 ## 三层记忆模型
 
@@ -202,15 +204,14 @@ http://127.0.0.1:<gui端口>/dev-memory/api/diag     # 诊断汇总 JSON（v0.4�
 - 面板用途：不启新会话也能自查记忆库（状态速览 + 跨层检索）。
 - **入口（v0.5）**：GUI 本身没有全局导航链接到 `/dev-memory`（v0.3 已知限制），v0.5 起从 **DSH 设置 →「记忆管理」** 页的「打开记忆面板」按钮直达，也可直接在地址栏输入 URL。`webui.enabled=false` 会摘除路由（设置页实时生效）。
 
-## 设置页「记忆管理」（v0.5）
+## 设置页「记忆管理」（v0.5 起；v0.7.1 迁移到 DSH 0.1.7 设置模型）
 
-插件把 WebUI 功能与可调参数接入 **DSH 设置体系**（参考 dshmarket 等已安装插件的做法，`@deepseek-ai/dsh-settings` 的 `installSettingsSection` 机制）：
-
+- **字段声明**：可编辑参数由插件自己导出的 schemastery `Config`（`src/config.ts`）声明，live 字段标 `.volatile()`。DSH 0.1.7 起 `ctx.settings` 只投影**声明了 volatile 的字段**，命名空间就是 profile 条目 id（`dsh-plugin-memory-3t`），表单写入持久化到 **profile 的 `cordis.patch.yml`**——0.1.1 时代"`installSettingsSection` 注册 namespace + 写 Host 设置文档"的机制已随 0.1.7 整体移除（本插件 v0.7.1 完成迁移）。
 - **DSH 设置 →「记忆管理」**（`settings.section` 独立选项页，**v0.5.3 起为插件参数唯一编辑面**）：页面顶部提供「打开记忆面板」入口，下方是完整可编辑表单（参数只出现一次）。**v0.5.4 起移除页面顶部的「记忆库状态」卡**——其状态行（版本回溯/检索/诊断记录）与表单开关主题重合、造成"参数重复"观感；库状态（库根/粒度/条目/VCS/检索/诊断计数）回归只读面板 `/dev-memory/` 查看，设置页保持纯参数编辑面。
-- v0.5.0–0.5.2 还曾在 **设置 → 插件 → 可配置** 选项卡内注册同一组参数的可折叠卡片（`settings.plugin.item`），与独立页功能重复、参数两处可见；**v0.5.3 起删除卡片槽位**，参数只在独立页一处编辑（v0.5.2 给卡片做的 `--dsw-alias-*` 主题对齐已并入独立页/表单样式）。
-- 表单写的字段存入 Host 设置文档（用户层覆盖组成层 entry 配置），**多数参数实时生效**（`onChange` live 应用：面板开关摘除/重挂路由，diag 开关/上限即改即用，nudge 开关启动/停止调度，vcs/embedding/digest/recall/预算按引用读取即时生效）；`storageDir` / `scope` / `workspaceDir` 属启动期库根绑定，重启后生效。
-- 无 settings 服务的环境（headless）自动跳过整个桥，插件行为与旧版完全一致（fail-open）。
-- 客户端 bundle（`client/client.js`，tsdown 构建，`dsh.client` 声明）仅在 web GUI 内加载；headless 不加载、零开销。
+- **生效方式（v0.7.1）**：volatile 字段改动**不重挂载插件**——loader 把新值提交进运行中的引用，再向插件 fiber 派发 `loader/volatile-update`，插件据此原地更新运行中 config（面板开关摘/挂路由、diag 开关与上限、nudge 开关、vcs/embedding/digest/recall/预算按引用即时生效）。`storageDir` / `scope` / `workspaceDir` 是**普通字段**（启动期库根绑定），改动会重挂载插件（等价"重启后生效"），因此刻意不进设置表单。
+- **客户端数据面（v0.7.1）**：`ctx.configForms.get('dsh-plugin-memory-3t')` 读写同一份值（旧的 `ctx.settingsScope` 已移除），并用 `whileServed([条目 id])` 注册页面——宿主没挂载本插件 / 当前 profile 没有设置服务时，页面自动摘除，不会留下永远"不可用"的空页。
+- **页面归属**：`apply` 里注册 `configure({ auto: false }, ctx.fiber)`——本插件自带页面，抑制宿主按 schema 自动生成的重复页面。
+- 客户端 bundle（`client/client.js`，tsdown 构建，`dsh.client` 声明）仅在 web GUI 内加载；headless 不加载、零开销。所有设置路径 fail-open：没有 settings 服务 / 没有 loader 时静默跳过。
 
 ## scope：user 全局库（v0.3）
 
@@ -394,7 +395,7 @@ npm test              # build + node --test（Windows 沙箱下用 --test-isolat
 - **embedding / pack**（v0.2）：本机无 Ollama 服务，embedding 用可注入 fetch 的 mock 全覆盖（成功 / 404 回退新 API / 网络失败降级 / 语义补漏 / 融合重排 / 禁用短路 6 路）；`dev-memory-pack` CLI 实测 pack→unpack 往返（单文件 `.dmmem`，派生物排除）。有 Ollama 的环境可直接开 `embedding.enabled` 走真机链路。
 - **v0.3**：scope:user 全局库（homedir 解析 + 不碰工作区 .gitignore，真机建库验证）；restore 整库时间片（真实 git 一次反转到快照：删的回来、新增的消失）；subagent 视图继承（生命周期事件实测）；recallNudge 调度（随机区间 + 每会话一次钳制）；WebUI 只读面板（路由分派 / touch:false 只读 / 404/405 全单测，真实 HTTP 面待 web GUI 重启后打开 `http://127.0.0.1:<端口>/dev-memory/` 核对）。
 - **v0.4（诊断与异常记录）**：工具调用异常 → `diag/events.jsonl` 自动落盘（工具名/参数摘要/堆栈）+ 生命周期/降级路径入记 + `devmemory_diag` 汇总/明细/清空 + status/boot/WebUI 都带诊断计数；压缩上限、禁用开关、参数脱敏全单测覆盖。
-- **v0.5（设置页 + GUI 入口）**：路由实测 200 正常、原不可见是"GUI 无导航入口"而非 bug；按 dshmarket 模式接入 DSH 设置体系——服务端 `installSettingsSection` 注册 `dev-memory` 设置 namespace（schema 覆盖 WebUI 与参数，写入 Host 设置文档、`onChange` live 生效），客户端 tsdown bundle 贡献设置页「记忆管理」（独立选项页：打开面板入口 + 库状态卡 + 完整表单，WebUI 开关可实时摘挂路由）与插件可配置卡片；headless 零开销 fail-open。安装副本验证：dist 含 settings.js、client/client.js 携带 `__ModuleLoader__` 工厂、dsh.client 声明就位。设置页真实 GUI 面待重启后打开 设置→记忆管理 核对。
+- **v0.5（设置页 + GUI 入口）**：路由实测 200 正常、原不可见是"GUI 无导航入口"而非 bug；按 dshmarket 模式接入 DSH 设置体系——服务端 `installSettingsSection` 注册 `dev-memory` 设置 namespace（schema 覆盖 WebUI 与参数，写入 Host 设置文档、`onChange` live 生效），客户端 tsdown bundle 贡献设置页「记忆管理」（独立选项页：打开面板入口 + 库状态卡 + 完整表单，WebUI 开关可实时摘挂路由）与插件可配置卡片；headless 零开销 fail-open。安装副本验证：dist 含 settings.js、client/client.js 携带 `__ModuleLoader__` 工厂、dsh.client 声明就位。设置页真实 GUI 面待重启后打开 设置→记忆管理 核对。（⚠ 该 `installSettingsSection` 机制在 DSH 0.1.7 已被移除，v0.7.1 迁移为"插件自带 `Config` + `ctx.configForms`"，见下方路线图。）
 - **v0.5.2（卡片手风琴化）**：插件可配置卡片由"默认展开的散放表单"改为与内置 PluginCard 一致的可折叠手风琴——头部（标题 + 描述 + 展开箭头 + 未保存徽标）点击展开才是表单，折叠不丢草稿；表单/卡片全部改用 `--dsw-alias-*` 主题令牌（此前混用自定义变量）。134 项单测（0 skip） + client typecheck + tsdown 构建通过后打包重装 headless/web 两 profile（version 0.5.2、client/client.js 携带 handshake 与手风琴结构）；发布包统一归档 `.memtest-pack`。真实 GUI 面对照插件市场卡片样式核对。
 - **v0.5.3（设置面去重）**：按用户验收——**删除「插件配置」选项卡内的可配置卡片**（`settings.plugin.item` 槽位与独立页功能重复、参数两处可见），「记忆管理」独立页（`settings.section`，打开面板 + 完整表单）成为参数唯一编辑面（单份 SECTION_FIELDS 表单）。移除 card.tsx + card 专用 locale（cardTitle/cardDesc/cardNote/expand/collapse），client bundle 29.7kB→25.1kB；134/134 单测全绿 0 跳过 + client typecheck + tsdown 构建后打包重装 headless/web 两 profile（version 0.5.3），归档 `.memtest-pack`。GUI 核对点：设置→插件→插件配置 无「记忆管理」卡片。
 - **v0.5.4（独立页纯参数面）**：用户反馈"记忆管理页面仍存在参数重复"——定位到独立页顶部的「记忆库状态」卡（版本回溯/检索/诊断记录状态行）与表单开关主题重合。**移除状态卡**（含 status fetch 与 status*/state* locale 键），库状态信息回归只读面板 `/dev-memory/`；client bundle 25.1kB→19.6kB；134/134 全绿 0 跳过。GUI 核对点：设置→记忆管理 顶部无状态卡。
@@ -433,6 +434,11 @@ npm test              # build + node --test（Windows 沙箱下用 --test-isolat
 - ✅ v0.6.4 完成（库根跑偏修复；**根因判定于 v0.6.5 被纠正，见上「事件勘误」**）：v0.6.3 及以前按 `process.cwd()` 建库（web 服务 cwd 非工作区即"跑偏"）。三条改动**确实有效**：①会话启动边绑定库根 + 装载 L1 回放/L3 top-k + subagent 视图继承 + digest 补做 + 未提交写入补交；②`pre-step`/`turn-stopping` 按 `payload.agent` 会话 cwd 复绑（多工作区不串库）；③`workspace` 自动解析不再在 apply 期按进程 cwd 急切建库。⚠ 但当时把根因写成"DSH 无 `agent/session-start`"是**错的**，随之写下的"事件清单不含 session-start"回归断言也是错的（v0.6.5 已改为断言**必须注册**）
 - ✅ v0.6.5 完成（事件勘误 + 注入时机重构 + 三项借鉴）：**①事件勘误**——`agent/session-start` 真实存在（payload `{agent, source}`，`agent/created` 无 `source`），v0.6.4 的"不存在"论断纠正，改为**兼听两条边**（幂等 + created→session-start 的 source 升级记录）并用 `source` 处理 `clear`/`compact` 的重装补注；**②注入时机重构**——boot 块静态化（逐请求但逐字节恒定、不破坏 prefix 缓存），会话状态与 L1/L3 召回改为**每会话一次**注入（原为每请求重复，最多约 2600 tokens/轮）；**③三态可用性**（`ok`/`empty`/`unavailable`，故障 ≠ 空库）；**④库根来源守卫**（会话内无法解析真实工作区时拒绝写入、保留读取）；**⑤冷启动 seed**（`devmemory_seed`，无 LLM 从 git/README/manifest/目录生成 L2 骨架 + 候选 L3，不自动写 L3）；**⑥零依赖 MCP stdio 面**（`dev-memory-mcp`，手写 JSON-RPC，无 `@modelcontextprotocol/sdk`）
 - ✅ v0.6.6 完成（注入瘦身）：**①L3 默认不注入**——新增 `l3Inject: off|salience|query`（默认 `off`），实测 48 条 L3 里 20 条 salience 已顶格、排序实际由历史 accesses 决定，选出的全是老发版记录且 5 条 922 tokens > 800 预算被整块截掉；**②`maxViewTokens` 全局预算**（默认 2000，按 状态→L1→L3 顺序扣减，防前块挤光后块）；**③L3 逐条摘要钳制 140 tokens**（单条不再独吞整块）；**④L1 回放去重**（剔除本会话自己的 prompt 回放，实测 L1 块 1481 tokens 大头是重复内容）+ 标题取值修复（原取第一行 → 注入出现 `## - user: …` 畸形标题）；**⑤修 `clampTokens` 短文本死循环**（预算小于截断标记开销时 `Math.max(1, floor(len*0.8))` 原地踏步，v0.1 起潜伏）；设置页新增两项参数（下拉框字段类型）；176/176 测试全绿 0 跳过（含 git 集成 14 项 + MCP 8 项）
+- ✅ v0.7.0 完成（工具瘦身）：默认 `toolsProfile: core` = 5 个高频工具 + 1 个 action 式 `devmemory_admin`（低频运维合并），常驻 schema 实测 2081 → 943 tokens/调用；`full` 保留 v0.6 的 12 个独立工具；子代理默认不注入视图；L1 回放逐行摘要 + 整行截断；检索加覆盖率与标题加权
+- ✅ v0.7.1 完成（适配 DSH 0.1.7 设置模型）：0.1.7 移除了 `installSettingsSection` / `settingsNamespace` / `SettingsProvider` → 改为**插件自带 schemastery `Config`（`.volatile()` 标 live 字段）+ 监听 `loader/volatile-update` 回放有效配置**，客户端 `ctx.settingsScope` → `ctx.configForms`；同时不做运行时依赖 `@deepseek-ai/dsh-settings`（改 peer），根治了 profile 内旧版 dsh-settings 副本抢占导致的 `settings ... TypeError: this.load is not a function`（`dsh web` 的 `1 entry did not activate`）
+- ✅ v0.7.2 完成（session format v4 消息来源）：v4 弃用 `{kind:'plugin', plugin:<包名>}`，注入消息改用生产者自有 kind **`plugin:dsh-plugin-memory-3t`**（与 DSH 的 v3→v4 迁移为旧日志推导出的形态一致），否则整轮以 `format v4 message requires a producer-owned source kind` 失败；回归测试直接调用 DSH 自己的 `assertV4RowAdmission()` 验证新写法被接受、旧写法被拒绝
+- ✅ v0.7.3 完成（启动版本日志）：`apply` 自报 `[dev-memory] vX loaded (producer source kind ...)`——DSH loader 按 URL 缓存 ESM 模块，**重装插件但不重启 dsh 进程时跑的还是旧模块**，这行日志是识别"当前跑的是哪份代码"的唯一现场依据
+- ✅ v0.7.4 完成（meta.json 重构）：schemaVersion 2 —— 删掉 v1 写死的**外部环境**信息（绝对库根与配置快照，实测残留过 WSL 路径 `/home/kiki/dsh work space/.memory`），只保留**环境无关的库身份**（storageDir + scope）与**库自身状态**（createdAt / digest / counters），外加每次打开都刷新的诊断字段 `lastOpen`；v1 旧文件首次打开即自动迁移，环境未变时不重写（不污染记忆库自身的 git 历史）；会话状态块对"库尚未初始化"不再误报 `VCS off（git 不可用）`
 - v0.6（候选）：多库并存切换（named libraries）、recall 结果缓存与面板历史、scope 迁移工具（workspace→user 搬家）
 
 ## License

@@ -255,13 +255,18 @@ export function renderBootBlock(status: StoreStatus, budget: number): string {
   return clampTokens(lines.filter((line) => line !== '').join('\n'), budget)
 }
 
-/** VCS 状态行（易变：提交数 / 待提交数）——只进每会话一次的 status 块。 */
-export function renderVcsLine(vcs: StoreStatus['vcs']): string {
+/**
+ * VCS 状态行（易变：提交数 / 待提交数）——只进每会话一次的 status 块。
+ * @param vcs - git 版本回溯状态。
+ * @param libraryReady - 库是否已初始化（未初始化时不能断言"git 不可用"，那只是还没探测）。
+ */
+export function renderVcsLine(vcs: StoreStatus['vcs'], libraryReady = true): string {
   if (!vcs.enabled) return '版本回溯：VCS off（已禁用）'
   if (vcs.ready) {
     const pending = vcs.pendingWrites > 0 ? `，待提交 ${vcs.pendingWrites}` : ''
     return `版本回溯：VCS on（${vcs.branch ?? '?'}，${vcs.commits} 次提交${pending}）`
   }
+  if (!libraryReady) return '版本回溯：待首次写入后确认（库尚未初始化）'
   return vcs.available ? '版本回溯：VCS off（未就绪）' : '版本回溯：VCS off（git 不可用，仅本地存储）'
 }
 
@@ -281,7 +286,7 @@ export function renderStatusBlock(status: StoreStatus, budget: number): string {
   const lines = [
     '[dev-memory 会话状态]（本次会话快照，非实时；需要最新用 devmemory_status）',
     `- 条目：L3 ${status.counts.l3} 条 / L2 ${status.counts.l2} 篇 / L1 ${status.counts.l1} 份流水`,
-    `- ${renderVcsLine(status.vcs)}`,
+    `- ${renderVcsLine(status.vcs, status.ready)}`,
     `- ${renderEmbeddingLine(status.embedding)}`,
     // v0.6.5：不可用（降级）与空库是相反的语义，必须分别显式说明，不能让模型以为"没有记忆"
     status.availability === 'unavailable'

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 「记忆管理」设置页文案（zh/en）。
  * 键与 ui-settings 插件的 locale.register 约定一致（普通字符串字典）。
  */
@@ -144,7 +144,7 @@ export const zh: LocaleDict = {
   saveFailed: '保存失败，请重试',
   readOnly: '当前设置文档只读（进程内 memory 模式），请重启后再改。',
   loading: '加载中…',
-  unavailable: '设置命名空间不可用（服务端设置桥未激活）。',
+  unavailable: '设置表单不可用：宿主未挂载本插件条目，或当前 profile 没有设置服务。',
 }
 
 export const en: LocaleDict = {
@@ -218,5 +218,5 @@ export const en: LocaleDict = {
   saveFailed: 'Save failed, retry',
   readOnly: 'Settings document is read-only (in-process memory mode); restart to edit.',
   loading: 'Loading…',
-  unavailable: 'Settings namespace unavailable (server bridge inactive).',
+  unavailable: 'Settings form unavailable: the Host does not mount this plugin entry, or this profile has no settings service.',
 }

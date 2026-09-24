@@ -43,7 +43,8 @@ import { seedLibrary } from './seed.js'
 import { resolveRoot } from './paths.js'
 import { loadMemorySkillContent, MEMORY_SKILL_DESCRIPTION, MEMORY_SKILL_INVOCATION, MEMORY_SKILL_NAME, MEMORY_SKILL_WHEN_TO_USE } from './skill.js'
 import { MemoryStore } from './store.js'
-import { applyEffective, installDevMemorySettings } from './settings.js'
+import { applyEffective, installDevMemorySettings, installSettingsPresentationPolicy } from './settings.js'
+import { PLUGIN_VERSION } from './shared.js'
 import { createTools } from './tools.js'
 import { registerWebPanel } from './webui.js'
 
@@ -65,6 +66,18 @@ export interface PluginContext {
 
 export const name = 'dsh-plugin-memory-3t'
 export const inject = ['systemPrompt', 'skills', 'tools']
+
+/**
+ * 宿主设置表单 schema（DSH 0.1.7+）。
+ *
+ * loader 通过 `fiber.runtime.Config` 读取它：只有声明了 `.volatile()` 的字段会出现在设置表单里，
+ * 表单命名空间 = profile 条目 id（`dsh-plugin-memory-3t`），写入持久化到 profile 的
+ * cordis.patch.yml。普通字段（storageDir/scope/workspaceDir）刻意不标记，改动即重挂载插件。
+ */
+export { Config } from './config.js'
+
+/** 版本与 wire 契约常量（诊断用：`node -e "import('dsh-plugin-memory-3t').then(m=>console.log(m.PLUGIN_VERSION))"`）。 */
+export { DEV_MEMORY_ENTRY_ID, DEV_MEMORY_SETTINGS_NS, PLUGIN_VERSION } from './shared.js'
 
 interface AgentView {
   /** 易变状态块（v0.6.5：原在 boot 块里逐请求注入，现随本视图一次性注入）。 */
@@ -109,12 +122,24 @@ const L3_QUERY_MAX_CHARS = 500
 /** 会话缓冲区取多少条最近用户消息用于 L1 去重 / L3 检索（v0.6.6）。 */
 const RECENT_PROMPT_LIMIT = 8
 
+/**
+ * 本插件的 producer-owned 消息来源 kind（session format v4）。
+ *
+ * v4 弃用了 `{ kind: 'plugin', plugin: '<包名>' }`：来源 kind 必须由生产者自己拥有，
+ * 空串与字面量 `plugin` 都会被拒绝（`format v4 message requires a producer-owned source kind`）。
+ * 第三方插件的规范形态是 `plugin:<包名>`——这也正是 DSH 的 v3→v4 迁移为旧日志推导出的
+ * kind（`dsh-session-format-v3-to-v4` 的 producerKind 回退分支），因此新旧两代日志读回同一形态。
+ * 参考同类插件实现：dsh-better-sidebar 的 `plugin:dsh-better-sidebar`。
+ */
+export const PRODUCER_SOURCE_KIND = 'plugin:dsh-plugin-memory-3t'
+
 function createPluginMessage(text: string, form: string, summary?: string): Record<string, unknown> {
   return {
     id: randomUUID(),
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'dsh-plugin-memory-3t', form, ...(summary === undefined ? {} : { summary }) },
+    // v0.7.2：v4 只认生产者自有 kind（旧写法 { kind:'plugin', plugin } 会让本轮运行失败）。
+    source: { kind: PRODUCER_SOURCE_KIND, form, ...(summary === undefined ? {} : { summary }) },
   }
 }
 
@@ -123,6 +148,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 export function apply(ctx: PluginContext, rawConfig: unknown): void {
+  // v0.7.3：启动自报版本 —— 重装插件但不重启 dsh 进程时，loader 的 ESM 缓存会继续跑旧模块，
+  // 这行日志是识别"当前跑的是哪份代码"的现场证据。
+  try {
+    ctx.logger.info?.(`[dev-memory] v${PLUGIN_VERSION} loaded (producer source kind ${PRODUCER_SOURCE_KIND})`)
+  } catch {
+    /* logger 不可用时静默 */
+  }
   const config: Config = mergeConfig(rawConfig)
   // v0.3.1：workspace 根按会话真实工作区（agent.session.header.cwd，DSH 规范）解析，
   // 不再假设进程 cwd。优先级：config.workspaceDir 显式固定 > 会话工作区根 > process.cwd()（headless/旧形态回退）。
@@ -637,7 +669,12 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
       nudge.setEnabled(config.recallNudge.enabled)
     }
   }
-  installDevMemorySettings(ctx, config, { apply: applySettingsLive })
+  // v0.7.1：DSH 0.1.7 起 settings 只投影插件自己声明的 volatile Config 字段，
+  // loader 把新值提交进 rawConfig 里的引用后派发 loader/volatile-update；
+  // 这里据此把有效配置写回运行中 config（原地）+ 触发 live 副作用。
+  installDevMemorySettings(ctx, rawConfig, { apply: applySettingsLive })
+  // 自带「记忆管理」设置页 → 抑制宿主按 schema 自动生成的重复页面。
+  installSettingsPresentationPolicy(ctx)
 }
 
 // ------------------------------------------------------------ 内部 helpers

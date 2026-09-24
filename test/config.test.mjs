@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_CONFIG, mergeConfig } from '../dist/config.js'
+import { isVolatile } from '@deepseek-ai/cosmokit'
+import z from '@deepseek-ai/schemastery'
+import { Config, DEFAULT_CONFIG, mergeConfig } from '../dist/config.js'
 
 test('config: 默认值完整', () => {
   assert.equal(DEFAULT_CONFIG.storageDir, '.memory')
@@ -106,4 +108,66 @@ test('config(v0.7.0): 工具暴露面 / subagent 注入 / L1 摘要 默认值与
   assert.equal(c.toolsProfile, 'full')
   assert.equal(c.subagentInject, true)
   assert.equal(c.l1MaxCharsPerLine, 0)
+})
+
+// ------------------------------------------------------------ v0.7.1：DSH 0.1.7 表单 schema
+
+test('config(v0.7.1): Config schema 把 live 字段解析成引用、启动期字段保持普通值', () => {
+  const parsed = Config({})
+  // volatile 字段 → cosmokit 引用（loader 可原地提交新值，不重挂载插件）
+  assert.equal(isVolatile(parsed.maxBootTokens), true)
+  assert.equal(parsed.maxBootTokens.get(), 600)
+  assert.equal(isVolatile(parsed.maxViewTokens), true)
+  assert.equal(isVolatile(parsed.l3Inject), true)
+  assert.equal(parsed.l3Inject.get(), 'off')
+  // 组级 volatile：整组是一个引用
+  assert.equal(isVolatile(parsed.webui), true)
+  assert.deepEqual(parsed.webui.get(), { enabled: true })
+  assert.equal(isVolatile(parsed.vcs), true)
+  // 启动期绑定字段必须是普通值（改动 → 重挂载插件，而不是 live 提交）
+  assert.equal(isVolatile(parsed.storageDir), false)
+  assert.equal(parsed.storageDir, '.memory')
+  assert.equal(isVolatile(parsed.scope), false)
+  assert.equal(parsed.scope, 'workspace')
+  assert.equal(isVolatile(parsed.workspaceDir), false)
+  assert.equal(parsed.workspaceDir, '')
+  // 解引用后归一化 = 运行时默认值（表单默认值与 DEFAULT_CONFIG 不漂移）
+  assert.deepEqual(mergeConfig(parsed), DEFAULT_CONFIG)
+})
+
+test('config(v0.7.1): schema 解析部分组配置并补齐组内默认值', () => {
+  const parsed = Config({ vcs: { enabled: false }, webui: { enabled: false }, maxBootTokens: 300 })
+  assert.equal(parsed.vcs.get().enabled, false)
+  assert.equal(parsed.vcs.get().autoCommit, true)
+  assert.equal(parsed.vcs.get().batch, 8)
+  assert.equal(parsed.webui.get().enabled, false)
+  assert.equal(parsed.maxBootTokens.get(), 300)
+  const merged = mergeConfig(parsed)
+  assert.equal(merged.vcs.enabled, false)
+  assert.equal(merged.vcs.autoCommit, true)
+  assert.equal(merged.webui.enabled, false)
+  assert.equal(merged.maxBootTokens, 300)
+})
+
+test('config(v0.7.1): schema 序列化含 volatile 标记，且 volatile 不嵌套', () => {
+  // 宿主的 volatileForm/plainSchema 消费的就是 `new z(schema.toJSON())` 重建出来的 schema，
+  // 这里用同一条路径断言（raw JSON 信封只有 uid/refs，meta 在原型上）。
+  const json = Config.toJSON()
+  const rebuilt = new z(json)
+  const node = (parent, key) => parent?.dict?.[key]
+  for (const key of ['maxBootTokens', 'maxRuntimeTokens', 'maxSpaceTokens', 'maxViewTokens', 'l3Inject', 'l1MaxCharsPerLine', 'subagentInject', 'toolsProfile', 'embedding', 'digest', 'recall', 'dedupe', 'index', 'recallNudge', 'vcs', 'diag', 'webui', 'seed']) {
+    assert.equal(node(rebuilt, key)?.meta?.volatile, true, `${key} 应为 volatile（设置表单可见）`)
+  }
+  for (const key of ['storageDir', 'scope', 'workspaceDir']) {
+    assert.equal(node(rebuilt, key)?.meta?.volatile, undefined, `${key} 不应 volatile（启动期绑定）`)
+  }
+  // schemastery 禁止 volatile 嵌套 volatile：组内字段不能再标
+  const vcs = node(rebuilt, 'vcs')
+  for (const key of ['enabled', 'autoCommit', 'debounceMs', 'batch', 'branch', 'identity', 'gitDir']) {
+    assert.equal(node(vcs, key)?.meta?.volatile, undefined, `vcs.${key} 不应再标 volatile`)
+  }
+  const serialized = JSON.stringify(json)
+  for (const key of ['webui', 'diag', 'recallNudge', 'vcs', 'embedding', 'digest', 'recall', 'seed', 'workspaceDir', 'scope', 'maxBootTokens', 'maxRuntimeTokens', 'maxSpaceTokens']) {
+    assert.ok(serialized.includes(key), `schema 序列化缺字段 ${key}`)
+  }
 })

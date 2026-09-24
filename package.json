@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-memory-3t",
-  "version": "0.7.0",
-  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实；git 版本回溯 + 可选 Ollama 向量融合检索 + pack/unpack 迁移 + 只读 WebUI + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 按会话真实工作区解析库根 + 诊断记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5）+ 三态可用性与写入守卫/冷启动 seed/零依赖 MCP stdio 面（v0.6.5）+ 注入瘦身（v0.6.6）+ 工具瘦身（v0.7.0：默认 5 高频工具 + 1 个 action 式 devmemory_admin，schema 实测省约 1.1k tokens/调用；L1 逐行摘要与整行截断；子代理默认不注入；检索改 BM25×覆盖率×标题命中）",
+  "version": "0.7.4",
+  "description": "本地三层记忆插件：L1 会话流水 / L2 知识笔记 / L3 长期事实；git 版本回溯 + 可选 Ollama 向量融合检索 + pack/unpack 迁移 + 只读 WebUI + scope:user 全局库 + subagent 视图继承 + 主动追忆 + 按会话真实工作区解析库根 + 诊断记录（v0.4）+ DSH 设置页「记忆管理」独立选项页（v0.5）+ 三态可用性与写入守卫/冷启动 seed/零依赖 MCP stdio 面（v0.6.5）+ 注入瘦身（v0.6.6）+ 工具瘦身（v0.7.0：默认 5 高频工具 + 1 个 action 式 devmemory_admin）+ 适配 DSH 0.1.7 设置模型（v0.7.1：表单来自插件自带 schemastery Config 的 volatile 字段、客户端改用 ctx.configForms；不再依赖 @deepseek-ai/dsh-settings）+ 修复 session format v4 注入消息来源（v0.7.2：改用生产者自有 kind `plugin:dsh-plugin-memory-3t`；旧的 `{kind:'plugin',plugin}` 会让本轮运行以 \"requires a producer-owned source kind\" 失败）+ 启动日志自报版本（v0.7.3：重装插件但不重启 dsh 进程时 loader 会继续跑 ESM 缓存里的旧模块，日志是识别依据）+ meta.json 重构（v0.7.4：schemaVersion 2 —— 只保留环境无关的库身份与库自身状态，删掉写死的外部环境绝对库根与过期配置快照，lastOpen 每次打开刷新；v1 旧文件自动迁移）",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -32,9 +32,14 @@
     "bundle": {
       "patch": "cordis.patch.yml"
     },
+    "compatibility": {
+      "dsh": ">=0.1.7-rc.1",
+      "dshReleases": {
+        "0.1.7-rc.1": "compatible"
+      }
+    },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-settings"
@@ -42,9 +47,9 @@
       "platform": "web"
     }
   },
-  "dependencies": {
-    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
-    "schemastery": "^3.18.0"
+  "peerDependencies": {
+    "@deepseek-ai/cosmokit": "^1.8.5",
+    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -53,10 +58,8 @@
     "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 \"test/*.test.mjs\""
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-client-locale": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-slots": "^0.1.1-rc.2",
+    "@deepseek-ai/cosmokit": "1.8.5",
+    "@deepseek-ai/schemastery": "3.18.4",
     "@types/node": "^24.13.3",
     "@types/react": "^18.3.12",
     "react": "^18.3.1",

@@ -40,7 +40,7 @@ jobs:
       - name: Build client bundle
         run: npm run build:client
 
-      - name: Build + full test suite (134/134, 0 skip under real git)
+      - name: Build + full test suite (205/205 with real git; 0 skipped)
         run: npm run test
 
       - name: Pack publish tarball

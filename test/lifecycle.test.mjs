@@ -1,10 +1,10 @@
-﻿import { test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { apply } from '../dist/index.js'
+import { apply, PRODUCER_SOURCE_KIND } from '../dist/index.js'
 
 /** git 可用性（集成测试用；无 git 环境跳过）。 */
 const GIT_OK = (() => {
@@ -105,8 +105,11 @@ test('lifecycle: pre-step 记录消息并注入提醒（预算内）', async () 
     assert.ok(Array.isArray(out1.messages))
     assert.ok(out1.messages.length > 1)
     const injected = out1.messages[out1.messages.length - 1]
-    assert.equal(injected.source.kind, 'plugin')
-    assert.equal(injected.source.plugin, 'dsh-plugin-memory-3t')
+    // v0.7.2：session format v4 弃用 { kind:'plugin', plugin }，
+    // 必须用生产者自有 kind（否则本轮运行以 "requires a producer-owned source kind" 失败）
+    assert.equal(injected.source.kind, 'plugin:dsh-plugin-memory-3t')
+    assert.equal(injected.source.kind, PRODUCER_SOURCE_KIND)
+    assert.equal(injected.source.plugin, undefined)
 
     // 第二次：无触发词 → 原样
     const out2 = await preStep(
@@ -389,7 +392,7 @@ test('lifecycle: 兼听 session-start/created（幂等 + clear/compact 重装 + 
       turn: 1,
       step: 1,
     })
-    const pluginMsgs = (out) => out.messages.filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+    const pluginMsgs = (out) => out.messages.filter((m) => m?.source?.kind === 'plugin:dsh-plugin-memory-3t')
 
     // 1) DSH 真实顺序：created 先到（payload 无 source）→ session-start 后到（带 source）；只装载一次
     const agent = { id: 'a1' }
@@ -609,7 +612,7 @@ test('lifecycle(v0.7.0): subagent 默认不注入视图/提醒（工具仍在）
 
     const next = async () => ({ kind: 'enter', messages: [] })
     const ask = (agent, id) => ({ agent, messages: [{ id, role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 })
-    const pluginMsgs = (out) => (out.messages ?? []).filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+    const pluginMsgs = (out) => (out.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-plugin-memory-3t')
 
     const outParent = await preStep(ask(parent, 'sp1'), next)
     assert.equal(pluginMsgs(outParent).length, 1, '父会话仍注入视图')
@@ -692,7 +695,7 @@ test('lifecycle(v0.7.0): pre-step 早于启动边也注入一次（headless 时�
     const preStep = calls.on.get('agent/pre-step')
     const next = async () => ({ kind: 'enter', messages: [] })
     const ask = (agent, id) => ({ agent, messages: [{ id, role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 })
-    const pluginMsgs = (out) => (out.messages ?? []).filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+    const pluginMsgs = (out) => (out.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-plugin-memory-3t')
 
     // headless 实测顺序：pre-step 先到，agent/created / session-start 后到
     const agent = { id: 'ord1', session: { header: { cwd: ws } } }
@@ -725,7 +728,7 @@ test('lifecycle(v0.7.0): parentSession 为空串按根会话处理（不得误�
       { agent, messages: [{ id: 'e1', role: 'user', content: [{ type: 'text', text: '继续' }] }], turn: 1, step: 1 },
       next,
     )
-    const injected = (out.messages ?? []).filter((m) => m?.source?.plugin === 'dsh-plugin-memory-3t')
+    const injected = (out.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-plugin-memory-3t')
     assert.equal(injected.length, 1, '空串 parentSession 是根会话，必须照常注入')
   } finally {
     process.chdir(cwd)

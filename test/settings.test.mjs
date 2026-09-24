@@ -1,28 +1,32 @@
 /**
- * v0.5 设置页桥测试。
+ * v0.7.1 设置桥测试（DSH 0.1.7 模型）。
  *
  * - applyEffective：可 live 字段原地更新 + 变更组；storageDir/scope/workspaceDir
  *   属启动期绑定（传入也不应用）；非法类型忽略。
- * - installDevMemorySettings：fail-open（无 inject / inject 不触发 / inject 抛错均不抛）。
- * - 依赖在场时：loadSettingsDeps 装配成功、buildSettingsSchema 形状正确、namespace 常量合法。
+ * - installDevMemorySettings：监听 `loader/volatile-update`，把 loader 提交后的 volatile
+ *   引用解引用、补齐默认值后交回 hooks.apply；无 ctx.on / on 抛错 → fail-open。
+ * - installSettingsPresentationPolicy：无 inject / 无 fiber / 无 settings 服务 → fail-open；
+ *   正常路径必须以插件自身 fiber 为 owner 注册 `{ auto: false }`。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { createVolatile, isVolatile, updateVolatile } from '@deepseek-ai/cosmokit'
+
 import { DEFAULT_CONFIG, mergeConfig } from '../dist/config.js'
+import { DEV_MEMORY_ENTRY_ID, DEV_MEMORY_SETTINGS_NS } from '../dist/shared.js'
 import {
-  DEV_MEMORY_SETTINGS_NS,
   SETTINGS_SURFACE_DEFAULTS,
   applyEffective,
-  buildSettingsSchema,
   installDevMemorySettings,
-  loadSettingsDeps,
+  installSettingsPresentationPolicy,
 } from '../dist/settings.js'
 
-test('settings: namespace 常量合法且与表面默认值一致', () => {
+test('settings: 常量（i18n 用 dev-memory，设置命名空间 = profile 条目 id）', () => {
   assert.match(DEV_MEMORY_SETTINGS_NS, /^[a-z][a-z0-9-]*$/)
   assert.equal(DEV_MEMORY_SETTINGS_NS, 'dev-memory')
+  assert.equal(DEV_MEMORY_ENTRY_ID, 'dsh-plugin-memory-3t')
   assert.equal(SETTINGS_SURFACE_DEFAULTS.webui.enabled, true)
   assert.equal(SETTINGS_SURFACE_DEFAULTS.diag.maxEvents, 2000)
 })
@@ -117,40 +121,92 @@ test('settings: applyEffective 无变化时不报变更', () => {
   assert.deepEqual(change, {})
 })
 
-test('settings: installDevMemorySettings fail-open（无 inject / inject 不触发 / 抛错）', () => {
-  const entry = mergeConfig({})
-  const hooks = { apply: () => { throw new Error('不应被调用') } }
-  // 无 inject
-  assert.equal(installDevMemorySettings({}, entry, hooks), undefined)
-  assert.equal(installDevMemorySettings(null, entry, hooks), undefined)
-  // inject 从不触发回调
-  assert.equal(installDevMemorySettings({ inject: () => {} }, entry, hooks), undefined)
-  // inject 本身抛错
-  assert.equal(installDevMemorySettings({ inject: () => { throw new Error('boom') } }, entry, hooks), undefined)
+test('settings: volatile 桥解引用引用、补齐默认值并回放有效配置', () => {
+  const rawConfig = {
+    maxBootTokens: createVolatile(321),
+    webui: createVolatile({ enabled: false }),
+    diag: { enabled: true, maxEvents: 2000 },
+  }
+  // 前提：这些确实是 cosmokit 引用（与 loader 提交的形态一致）
+  assert.equal(isVolatile(rawConfig.maxBootTokens), true)
+  assert.equal(isVolatile(rawConfig.webui), true)
+
+  const seen = []
+  let handler
+  installDevMemorySettings(
+    {
+      on: (event, fn) => {
+        assert.equal(event, 'loader/volatile-update')
+        handler = fn
+      },
+    },
+    rawConfig,
+    { apply: (next) => seen.push(next) },
+  )
+  assert.equal(typeof handler, 'function')
+  assert.deepEqual(seen, [])
+
+  // 模拟 loader 的 volatile-only 提交：引用内容变化，但不重挂载插件
+  updateVolatile(rawConfig.maxBootTokens, createVolatile(999))
+  handler()
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].maxBootTokens, 999)
+  assert.equal(seen[0].webui.enabled, false)
+  assert.equal(seen[0].diag.maxEvents, 2000)
+  // 未提供的字段补齐默认值
+  assert.equal(seen[0].storageDir, DEFAULT_CONFIG.storageDir)
+  assert.equal(seen[0].recall.minSalience, DEFAULT_CONFIG.recall.minSalience)
 })
 
-test('settings: 依赖在场时依赖装载与 schema 形状正确（缺依赖自动跳过）', async () => {
-  let deps
-  try {
-    deps = await loadSettingsDeps()
-  } catch {
-    deps = null
+test('settings: installDevMemorySettings fail-open（无 on / on 抛错 / hooks 抛错）', () => {
+  const hooks = { apply: () => { throw new Error('hook 抛错不应外泄') } }
+  assert.equal(installDevMemorySettings({}, {}, { apply: () => {} }), undefined)
+  assert.equal(installDevMemorySettings(null, {}, { apply: () => {} }), undefined)
+  assert.equal(
+    installDevMemorySettings({ on: () => { throw new Error('boom') } }, {}, { apply: () => {} }),
+    undefined,
+  )
+  // hooks.apply 抛错 → 事件回调内部吞掉（loader 侧同样不允许监听器抛错）
+  const handler = (() => {
+    let fn
+    installDevMemorySettings({ on: (_event, h) => { fn = h } }, {}, hooks)
+    return fn
+  })()
+  assert.doesNotThrow(() => handler())
+})
+
+test('settings: installSettingsPresentationPolicy fail-open 且以插件 fiber 注册策略', () => {
+  // 无 inject / 无 fiber / ctx 非法 → 静默跳过
+  assert.equal(installSettingsPresentationPolicy(null), undefined)
+  assert.equal(installSettingsPresentationPolicy({}), undefined)
+  assert.equal(installSettingsPresentationPolicy({ inject: () => {} }), undefined)
+  assert.equal(installSettingsPresentationPolicy({ inject: () => {}, fiber: {} }), undefined)
+  // inject 抛错 → 静默跳过
+  assert.equal(
+    installSettingsPresentationPolicy({ fiber: {}, inject: () => { throw new Error('boom') } }),
+    undefined,
+  )
+
+  const fiber = { id: 'plugin-fiber' }
+  const calls = []
+  const child = {
+    effect: (fn) => {
+      fn()
+      return () => {}
+    },
+    settings: {
+      configure: (presentation, owner) => {
+        calls.push([presentation, owner])
+        return () => {}
+      },
+    },
   }
-  if (deps === null) {
-    // 依赖缺失环境（CI 离线）→ fail-open 路径本身已被上一用例覆盖
-    assert.ok(true, '依赖缺失，跳过 schema 形状断言')
-    return
-  }
-  assert.equal(typeof deps.installSettingsSection, 'function')
-  assert.equal(typeof deps.settingsNamespace, 'function')
-  assert.ok(typeof deps.z.object === 'function')
-  const schema = buildSettingsSchema(deps.z)
-  // schemastery 的 Schema 实例是 callable（schema(value) 验证），typeof 为 function
-  assert.ok(schema !== null && (typeof schema === 'object' || typeof schema === 'function'))
-  // 序列化形态（schema.toJSON 由 schemastery Schema 提供）应含全部表面字段
-  const toJson = typeof schema.toJSON === 'function' ? schema.toJSON() : schema
-  const serialized = JSON.stringify(toJson)
-  for (const key of ['webui', 'diag', 'recallNudge', 'vcs', 'embedding', 'digest', 'recall', 'workspaceDir', 'scope', 'maxBootTokens', 'maxRuntimeTokens', 'maxSpaceTokens']) {
-    assert.ok(serialized.includes(key), `schema 序列化缺字段 ${key}`)
-  }
+  installSettingsPresentationPolicy({
+    fiber,
+    inject: (names, cb) => {
+      assert.deepEqual([...names], ['settings'])
+      cb(child)
+    },
+  })
+  assert.deepEqual(calls, [[{ auto: false }, fiber]])
 })

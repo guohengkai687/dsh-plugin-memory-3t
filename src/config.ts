@@ -1,3 +1,6 @@
+import { isVolatile } from '@deepseek-ai/cosmokit'
+import z from '@deepseek-ai/schemastery'
+
 /**
  * 配置：类型、默认值与合并。
  *
@@ -223,6 +226,140 @@ export const DEFAULT_CONFIG: Config = {
   seed: { enabled: true, auto: false, gitCommits: 30, maxEntries: 40 },
 }
 
+// ------------------------------------------------------------ 宿主表单 schema（DSH 0.1.7+）
+
+/**
+ * DSH 0.1.7 起插件参数表单来自插件自身导出的 schemastery `Config`：
+ * `ctx.settings` 只投影**声明了 `.volatile()`** 的字段，命名空间就是 profile 条目 id
+ * （cordis.patch.yml 里的 `id: dsh-plugin-memory-3t`），改动持久化到 profile 的
+ * cordis.patch.yml，并由 loader 在不重挂载插件的前提下把新值提交进运行中的 volatile 引用
+ * （事件 `loader/volatile-update`，见 settings.ts）。
+ *
+ * 字段分类：
+ * - **volatile**（live）：设置表单可编辑，改完立即生效（`applyEffective` 原地更新运行中 config）。
+ * - **普通字段**（storageDir / scope / workspaceDir）：启动期绑定库根，改动会触发插件重挂载
+ *   （等价"重启后生效"），故意不进设置表单。
+ *
+ * 约束（schemastery 强制）：volatile 必须位于固定对象路径，且**不能嵌在另一个 volatile
+ * 字段内部**——因此这里只把整组（如 `vcs`）或顶层标量标为 volatile，组内字段不再单独标记。
+ * 组级 volatile 也意味着表单按"整组对象"读写：客户端写回的是合并后的完整组对象，
+ * 组内未暴露的字段（identity / branch / gitDir 等）不会因表单保存而丢失。
+ */
+export const Config = z.object({
+  // 启动期绑定（普通字段：变更 → 插件重挂载）
+  storageDir: z.string().default('.memory'),
+  scope: z.union(['workspace', 'user']).default('workspace'),
+  workspaceDir: z.string().default(''),
+
+  // 注入预算与检索策略（live）
+  maxBootTokens: z.number().min(0).default(600).volatile(),
+  maxRuntimeTokens: z.number().min(0).default(1200).volatile(),
+  maxSpaceTokens: z.number().min(0).default(800).volatile(),
+  maxViewTokens: z.number().min(0).default(2000).volatile(),
+  l3Inject: z.union(['off', 'salience', 'query']).default('off').volatile(),
+  l1MaxCharsPerLine: z.number().min(0).default(160).volatile(),
+  subagentInject: z.boolean().default(false).volatile(),
+  toolsProfile: z.union(['core', 'full']).default('core').volatile(),
+
+  embedding: z
+    .object({
+      enabled: z.boolean().default(false),
+      endpoint: z.string().default('http://localhost:11434'),
+      model: z.string().default('nomic-embed-text'),
+      timeoutMs: z.number().min(0).default(3000),
+    })
+    .default({ enabled: false, endpoint: 'http://localhost:11434', model: 'nomic-embed-text', timeoutMs: 3000 })
+    .volatile(),
+
+  digest: z
+    .object({
+      maxMessages: z.number().min(0).default(24),
+      maxPromote: z.number().min(0).default(20),
+      maxRetries: z.number().min(0).default(2),
+    })
+    .default({ maxMessages: 24, maxPromote: 20, maxRetries: 2 })
+    .volatile(),
+
+  recall: z
+    .object({
+      defaultLimit: z.number().min(0).default(10),
+      minSalience: z.number().min(0).default(0.25),
+      highScore: z.number().min(0).default(0.6),
+    })
+    .default({ defaultLimit: 10, minSalience: 0.25, highScore: 0.6 })
+    .volatile(),
+
+  dedupe: z.object({ threshold: z.number().min(0).default(0.55) }).default({ threshold: 0.55 }).volatile(),
+
+  index: z.object({ rebuildAfterWrites: z.number().min(0).default(50) }).default({ rebuildAfterWrites: 50 }).volatile(),
+
+  recallNudge: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }).volatile(),
+
+  vcs: z
+    .object({
+      enabled: z.boolean().default(true),
+      autoCommit: z.boolean().default(true),
+      debounceMs: z.number().min(0).default(1000),
+      batch: z.number().min(1).default(8),
+      branch: z.string().default('main'),
+      identity: z
+        .object({
+          name: z.string().default('dsh-dev-memory'),
+          email: z.string().default('dev-memory@dsh.local'),
+        })
+        .default({ name: 'dsh-dev-memory', email: 'dev-memory@dsh.local' }),
+      gitDir: z.string(),
+    })
+    .default({
+      enabled: true,
+      autoCommit: true,
+      debounceMs: 1000,
+      batch: 8,
+      branch: 'main',
+      identity: { name: 'dsh-dev-memory', email: 'dev-memory@dsh.local' },
+    })
+    .volatile(),
+
+  diag: z
+    .object({
+      enabled: z.boolean().default(true),
+      maxEvents: z.number().min(0).default(2000),
+    })
+    .default({ enabled: true, maxEvents: 2000 })
+    .volatile(),
+
+  webui: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }).volatile(),
+
+  seed: z
+    .object({
+      enabled: z.boolean().default(true),
+      auto: z.boolean().default(false),
+      gitCommits: z.number().min(0).default(30),
+      maxEntries: z.number().min(1).default(40),
+    })
+    .default({ enabled: true, auto: false, gitCommits: 30, maxEntries: 40 })
+    .volatile(),
+})
+
+/**
+ * 把 loader 解析后的配置摊平成普通值。
+ *
+ * DSH 0.1.7 起 volatile 字段的解析结果是 cosmokit 的**引用**（`{ get() }`，由 loader
+ * 原地提交新值），不是普通值。本插件的运行期模型是"一份可变 config 对象 + 各模块按引用读取"
+ * （见 index.ts），所以每次读取前把顶层引用解引用成普通值；volatile 只标在顶层字段上
+ * （见 `Config`），因此只需处理顶层。
+ * @param partial - loader 解析后的配置（含 volatile 引用）或任意用户部分配置。
+ * @returns 顶层字段均为普通值的配置对象。
+ */
+function plainConfigFields(partial: unknown): Record<string, unknown> {
+  if (typeof partial !== 'object' || partial === null) return {}
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(partial as Record<string, unknown>)) {
+    out[key] = isVolatile(value) ? value.get() : value
+  }
+  return out
+}
+
 function clampNonNegative(value: unknown, fallback: number): number {
   const n = typeof value === 'number' && Number.isFinite(value) ? value : fallback
   return n >= 0 ? n : fallback
@@ -230,10 +367,10 @@ function clampNonNegative(value: unknown, fallback: number): number {
 
 /**
  * 合并用户配置（可部分提供、可嵌套），缺失字段取默认值，数值非负钳制。
- * @param partial - 来自 cordis settings 的部分配置对象。
+ * @param partial - 来自 cordis entry 的配置（DSH 0.1.7 下 volatile 字段是引用，先解引用）。
  */
 export function mergeConfig(partial: unknown): Config {
-  const p = (partial ?? {}) as Record<string, unknown>
+  const p = plainConfigFields(partial)
   const digest = (p.digest ?? {}) as Record<string, unknown>
   const recall = (p.recall ?? {}) as Record<string, unknown>
   const dedupe = (p.dedupe ?? {}) as Record<string, unknown>

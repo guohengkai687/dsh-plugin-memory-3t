@@ -1,23 +1,29 @@
 /**
- * 设置页桥（v0.5 新增）：把 dsh-plugin-memory-3t 的 WebUI 功能与可调参数接入
- * DSH 设置体系（settings namespace + 客户端「记忆管理」设置页/卡片）。
+ * 参数设置桥（v0.7.1 迁移到 DSH 0.1.7 模型）。
+ *
+ * DSH 0.1.7 起设置体系换了模型（旧的 `installSettingsSection` / `settingsNamespace` /
+ * `SettingsProvider` 全部移除）：
+ * - 可编辑字段由插件自己导出的 schemastery `Config` 声明（`src/config.ts`，`.volatile()` 标记），
+ *   宿主 `ctx.settings` 按 profile 条目 id（= 包名 `dsh-plugin-memory-3t`）投影成表单，
+ *   写入持久化到 profile 的 cordis.patch.yml；
+ * - volatile 字段的改动**不重挂载插件**：loader 把新值提交进插件持有的引用，再向插件 fiber
+ *   派发 `loader/volatile-update`；
+ * - 客户端「记忆管理」页通过 `ctx.configForms.get(条目 id)` 读写同一份值。
  *
  * 服务端职责（本文件，node 侧）：
- * - 动态加载 `@deepseek-ai/dsh-settings` 与 `schemastery`：未安装 / headless
- *   （无 settings 服务）/ import 失败 → fail-open 跳过，插件行为与 v0.4 完全一致。
- * - 用 installSettingsSection 注册 namespace `dev-memory`：组成层 entry 配置
- *   （mergeConfig 后的完整 Config）作 base，schema 描述可编辑表面（含默认值），
- *   用户设置文档覆盖其上；resolve = schema 默认值 → base → 用户层。
- * - onChange（含首次 attach）把有效配置经 applyEffective 实时写入运行中 config：
- *   组对象原地更新——store/GitVcs/EmbeddingClient/DiagLog 均持有相同对象引用，
- *   随读随见；并返回"变更组"供 index 触发 live 钩子
+ * - 监听 `loader/volatile-update`，把新值重新归一化（mergeConfig）后经 applyEffective
+ *   原地写入运行中 config：组对象原地更新——store/GitVcs/EmbeddingClient/DiagLog 均持有
+ *   相同对象引用，随读随见；并返回"变更组"供 index 触发 live 钩子
  *   （WebUI 重挂载 / diag caps / nudge 开关）。
+ * - 声明"本插件自带设置页"（`configure({ auto: false }, ctx.fiber)`），避免宿主再按 schema
+ *   生成一个重复页面。
+ * - 全部路径 fail-open：没有 settings 服务 / 没有 loader（headless、单测）→ 静默跳过。
  *
- * 边界：storageDir / scope / workspaceDir 属启动期库根绑定，中间会话不切换，
- * 设置页标注"重启后生效"，applyEffective 不做修改；其余字段 live 应用。
+ * 边界：storageDir / scope / workspaceDir 属启动期库根绑定，是**普通字段**（非 volatile），
+ * 改动会重挂载插件（等价"重启后生效"），applyEffective 不做修改；其余字段 live 应用。
  */
 
-import type { Config } from './config.js'
+import { mergeConfig, type Config } from './config.js'
 import { DEV_MEMORY_SETTINGS_NS } from './shared.js'
 
 export { DEV_MEMORY_SETTINGS_NS }
@@ -228,124 +234,13 @@ export function applyEffective(target: Config, next: unknown): ConfigChange {
   return change
 }
 
-// ---------------------------------------------------------------- schema
+// ------------------------------------------------- 可编辑参数面（默认值形状）
 
-interface SettingsDeps {
-  installSettingsSection: <T>(
-    ctx: unknown,
-    ns: string,
-    schema: unknown,
-    entry: T,
-    hooks: { setSource(current: () => T): void; onChange(): void },
-  ) => void
-  settingsNamespace: (value: string) => string
-  z: {
-    object(shape: Record<string, unknown>): unknown
-    boolean(): unknown
-    string(): unknown
-    number(): unknown
-  }
-}
-
-/** schemastery 包名：优先 @deepseek-ai 分叉，回退官方包。 */
-const SCHEMASTERY_SPECIFIERS = ['@deepseek-ai/schemastery', 'schemastery'] as const
-
-/** 动态加载设置依赖；任一缺失返回 null（调用方 fail-open）。 */
-async function loadSettingsDeps(): Promise<SettingsDeps | null> {
-  try {
-    const settings = (await import('@deepseek-ai/dsh-settings')) as unknown as {
-      installSettingsSection?: SettingsDeps['installSettingsSection']
-      settingsNamespace?: SettingsDeps['settingsNamespace']
-    }
-    const z = await loadSchemastery()
-    const installSettingsSection = settings.installSettingsSection
-    const settingsNamespace = settings.settingsNamespace
-    // schemastery 的默认导出是 callable 函数（挂 .object/.string/.number 等），
-    // 不是普通 object——用 typeof !== 'object' 判定会误判为缺失。
-    if (typeof installSettingsSection !== 'function' || typeof settingsNamespace !== 'function' || (typeof z !== 'object' && typeof z !== 'function') || z === null) {
-      return null
-    }
-    const zx = z as { boolean(): unknown; string(): unknown; number(): unknown; object(shape: Record<string, unknown>): unknown }
-    if (typeof zx.boolean !== 'function' || typeof zx.string !== 'function' || typeof zx.number !== 'function' || typeof zx.object !== 'function') {
-      return null
-    }
-    return {
-      installSettingsSection: installSettingsSection as SettingsDeps['installSettingsSection'],
-      settingsNamespace: settingsNamespace as SettingsDeps['settingsNamespace'],
-      z: {
-        boolean: () => zx.boolean(),
-        string: () => zx.string(),
-        number: () => zx.number(),
-        object: (shape) => zx.object(shape),
-      },
-    }
-  } catch {
-    return null
-  }
-}
-
-/** 依次尝试 schemastery 包名，返回默认导出；全部失败 → null。 */
-async function loadSchemastery(): Promise<unknown> {
-  for (const specifier of SCHEMASTERY_SPECIFIERS) {
-    try {
-      const mod = (await import(specifier)) as { default?: unknown }
-      if (mod.default !== undefined) return mod.default
-    } catch {
-      /* 尝试下一个 */
-    }
-  }
-  return null
-}
 
 /**
- * 构建可编辑表面 schema（与客户端表单字段一致；全部带默认值，使
- * resolve = schema 默认值 → base(entry) → 用户层 总能给出完整可读面）。
+ * 提供参数面默认值的形状（与 `src/config.ts` 的 `Config` schema 默认值一一对应，
+ * 由 `test/config.test.mjs` 断言不漂移）。
  */
-function buildSettingsSchema(z: SettingsDeps['z']): unknown {
-  return z.object({
-    webui: z.object({ enabled: z.boolean() }),
-    diag: z.object({
-      enabled: z.boolean(),
-      maxEvents: z.number(),
-    }),
-    recallNudge: z.object({ enabled: z.boolean() }),
-    vcs: z.object({
-      enabled: z.boolean(),
-      autoCommit: z.boolean(),
-      debounceMs: z.number(),
-      batch: z.number(),
-    }),
-    embedding: z.object({
-      enabled: z.boolean(),
-      endpoint: z.string(),
-      model: z.string(),
-      timeoutMs: z.number(),
-    }),
-    digest: z.object({ maxMessages: z.number() }),
-    recall: z.object({ minSalience: z.number() }),
-    // v0.6.5：冷启动 seed（无 LLM 生成项目骨架）
-    seed: z.object({
-      enabled: z.boolean(),
-      auto: z.boolean(),
-      gitCommits: z.number(),
-      maxEntries: z.number(),
-    }),
-    workspaceDir: z.string(),
-    scope: z.string(),
-    maxBootTokens: z.number(),
-    maxRuntimeTokens: z.number(),
-    maxSpaceTokens: z.number(),
-    // v0.6.6：会话视图全局预算 + L3 注入方式（off/salience/query）
-    maxViewTokens: z.number(),
-    l3Inject: z.string(),
-    // v0.7.0：L1 逐行摘要 / subagent 注入 / 工具暴露面
-    l1MaxCharsPerLine: z.number(),
-    subagentInject: z.boolean(),
-    toolsProfile: z.string(),
-  })
-}
-
-/** 提供 schema 默认值的形状（与 buildSettingsSchema 字段一一对应）。 */
 export const SETTINGS_SURFACE_DEFAULTS = {
   webui: { enabled: true },
   diag: { enabled: true, maxEvents: 2000 },
@@ -375,45 +270,75 @@ export interface DevMemorySettingsHooks {
   apply(next: unknown): void
 }
 
+// ------------------------------------------------- volatile 配置桥（DSH 0.1.7+）
+
+/** 设置桥钩子：每次 volatile 配置提交（或首次装配）后收到一份完整有效配置。 */
+export interface DevMemorySettingsHooks {
+  /** 应用有效配置到运行中 target 并做 live 副作用（由 index 提供）。 */
+  apply(next: unknown): void
+}
+
+/** loader 把 volatile 新值提交进运行引用后派发给插件自身 fiber 的事件。 */
+const VOLATILE_UPDATE_EVENT = 'loader/volatile-update'
+
 /**
- * 安装设置桥（fail-open）：无 settings 服务 / 依赖缺失 / 注册失败 → 静默跳过。
- * 注册 ns=`dev-memory`：base=entry（组成层），用户文档覆盖，resolve 即有效配置；
- * 每次变更（含首次 attach）调用 hooks.apply。
- * @param ctx - 插件 ctx（需具备 inject，headless stub 无则跳过）。
- * @param entry - 组成层 entry 配置（mergeConfig 后的完整 Config）。
+ * 安装 volatile 配置桥（fail-open）：无 loader / 无 `ctx.on` → 静默跳过。
+ *
+ * loader 在 volatile-only 变更时不重挂载插件，而是把新值写进 `rawConfig` 里的引用，
+ * 再派发 `loader/volatile-update`。这里据此重新解引用 + 归一化，得到一份完整有效配置
+ * 交给 hooks.apply（applyEffective 原地写入运行中 config）。
+ * @param ctx - 插件 ctx（需具备 on，headless stub 无则跳过）。
+ * @param rawConfig - 插件收到的 entry 配置（volatile 字段为引用，随 loader 更新）。
  * @param hooks - apply 回调。
  */
-export function installDevMemorySettings(ctx: unknown, entry: Config, hooks: DevMemorySettingsHooks): void {
-  const c = ctx as { inject?(name: readonly string[], callback: (scoped: unknown) => void): unknown } | null
-  if (c === null || typeof c !== 'object' || typeof c.inject !== 'function') return
+export function installDevMemorySettings(ctx: unknown, rawConfig: unknown, hooks: DevMemorySettingsHooks): void {
+  const c = ctx as { on?(event: string, handler: (...args: unknown[]) => unknown): unknown } | null
+  if (c === null || typeof c !== 'object' || typeof c.on !== 'function') return
+  try {
+    c.on(VOLATILE_UPDATE_EVENT, () => {
+      try {
+        hooks.apply(mergeConfig(rawConfig))
+      } catch {
+        /* 应用失败不中断设置链路（fail-open） */
+      }
+    })
+  } catch {
+    /* ctx.on 不可用 → 跳过 */
+  }
+}
+
+/**
+ * 声明"本插件自带设置页"，抑制宿主按 schema 自动生成重复页面（DSH 0.1.7+）。
+ *
+ * 按官方约定：在 `apply` 里开一个可选的 `ctx.inject(['settings'], …)` 子作用域，
+ * 用 `child.effect` 注册 `configure({ auto: false }, ctx.fiber)`——owner 必须是插件自己的
+ * fiber（默认值是 settings 服务自身的 fiber）。策略只影响"是否自动生成页面"，
+ * 不影响表单读取与写入。
+ * @param ctx - 插件 ctx（需具备 inject 与 fiber，headless/测试 stub 无则跳过）。
+ */
+export function installSettingsPresentationPolicy(ctx: unknown): void {
+  const c = ctx as {
+    fiber?: unknown
+    inject?(name: readonly string[], callback: (scoped: unknown) => void): unknown
+  } | null
+  if (c === null || typeof c !== 'object' || typeof c.inject !== 'function' || c.fiber === undefined) return
   try {
     c.inject(['settings'], (scoped) => {
-      void (async () => {
-        try {
-          const deps = await loadSettingsDeps()
-          if (deps === null) return
-          let source: () => unknown = () => entry
-          deps.installSettingsSection(scoped, deps.settingsNamespace(DEV_MEMORY_SETTINGS_NS), buildSettingsSchema(deps.z), entry, {
-            setSource: (current) => {
-              source = current as () => unknown
-            },
-            onChange: () => {
-              try {
-                hooks.apply(source())
-              } catch {
-                /* 应用失败不中断设置链路（fail-open） */
-              }
-            },
-          })
-        } catch {
-          /* 依赖缺失/注册失败 → 跳过（fail-open） */
-        }
-      })()
+      const s = scoped as {
+        effect?(fn: () => unknown, label?: string): unknown
+        settings?: { configure?(presentation: { auto?: boolean }, owner?: unknown): unknown }
+      } | null
+      if (s === null || typeof s !== 'object' || typeof s.effect !== 'function') return
+      const configure = s.settings?.configure
+      if (typeof configure !== 'function') return
+      const owner = c.fiber
+      try {
+        s.effect(() => configure.call(s.settings, { auto: false }, owner))
+      } catch {
+        /* 策略已注册 / 服务不可用 → 跳过（fail-open） */
+      }
     })
   } catch {
     /* ctx.inject 不可用 → 跳过 */
   }
 }
-
-// 为方便测试暴露构建器
-export { buildSettingsSchema, loadSettingsDeps }
