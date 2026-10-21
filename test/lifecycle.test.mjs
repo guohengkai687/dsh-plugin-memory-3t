@@ -163,25 +163,30 @@ test('lifecycle: workspace 根跟随会话 header.cwd（v0.3.1），工具用 ge
     apply(ctx, { storageDir: '.memory', vcs: { enabled: false } })
     await settle()
 
-    // 无 header.cwd 的 agent：库根 = 进程 cwd（旧行为回退）
+    // v0.8.0（B1）：boot 块恒定（systemPrompt 全局注册拿不到当前会话），不得再出现库根
+    const bootA = calls.contexts[0].text({ agent: { id: 'a1' } })
+    assert.ok(!bootA.includes('.memory'), 'boot 块不得含库根: ' + bootA)
+
+    const statusTool = calls.tools.find((t) => t.name === 'devmemory_status')
+    const rememberTool = calls.tools.find((t) => t.name === 'devmemory_remember')
+    assert.ok(statusTool && rememberTool)
+
+    // 无 header.cwd 的 agent：库根 = 进程 cwd（旧行为回退），按 exec.agent 解析
     const agentA = { id: 'a1' }
     await calls.on.get('agent/created')({ agent: agentA, source: 'startup' })
-    const bootA = calls.contexts[0].text({ agent: agentA })
-    assert.ok(bootA.includes(join(ws, '.memory')), '无 cwd 的会话应回退进程 cwd: ' + bootA)
+    const statusA = await statusTool.execute({}, { agent: agentA })
+    assert.equal(statusA.root, join(ws, '.memory'), '无 cwd 的会话应回退进程 cwd: ' + statusA.root)
 
     // 带 session.header.cwd 的 agent：库根切换到会话真实工作区
     const agentB = { id: 'b1', session: { header: { cwd: ws2 } } }
     await calls.on.get('agent/created')({ agent: agentB, source: 'startup' })
-    const bootB = calls.contexts[0].text({ agent: agentB })
-    assert.ok(bootB.includes(join(ws2, '.memory')), 'boot 库根应指向会话工作区: ' + bootB)
+    const statusB = await statusTool.execute({}, { agent: agentB })
+    assert.equal(statusB.root, join(ws2, '.memory'), '工具应按 exec.agent 解析到会话工作区库: ' + statusB.root)
 
-    // 工具按 getter 动态解析到会话工作区库（写读闭环）
-    const statusTool = calls.tools.find((t) => t.name === 'devmemory_status')
-    const rememberTool = calls.tools.find((t) => t.name === 'devmemory_remember')
-    assert.ok(statusTool && rememberTool)
-    const remembered = await rememberTool.execute({ content: '工作区根解析回归：库应落在工作区', kind: 'context' })
+    // 工具按 exec.agent 动态解析到会话工作区库（写读闭环）
+    const remembered = await rememberTool.execute({ content: '工作区根解析回归：库应落在工作区', kind: 'context' }, { agent: agentB })
     assert.ok(remembered.id)
-    const status = await statusTool.execute({})
+    const status = await statusTool.execute({}, { agent: agentB })
     assert.equal(status.root, join(ws2, '.memory'), '工具应解析到会话工作区库: ' + status.root)
     assert.equal(status.counts.l3, 1)
   } finally {

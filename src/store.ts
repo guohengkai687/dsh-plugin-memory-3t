@@ -291,6 +291,8 @@ export class MemoryStore {
       throw error
     }
     if (this.meta === null) await this.loadMeta()
+    // v0.8.0（F6）：meta.counters 与实际库内文件数对齐（只向上修正，见 reconcileCounters 注释）
+    await this.reconcileCounters().catch(() => undefined)
     try {
       await appendFile(safeJoin(this.root, 'audit.jsonl'), '', { flag: 'a', mode: 0o600 })
     } catch {
@@ -444,6 +446,43 @@ export class MemoryStore {
     if (this.meta === null) return
     this.meta.counters[key] = (this.meta.counters[key] ?? 0) + delta
     await this.writeMeta()
+  }
+
+  /**
+   * v0.8.0（F6）：把 meta.counters 与实际库内文件数对齐（**只向上修正**，永不回退）。
+   *
+   * 为什么会漂：0.7.3 及以前有写入路径不 bump 计数，加上多工作区串库时期把写入记到了
+   * 别人的库上，meta.json 长期少报（实测 Harness entriesTotal 35 vs 实际 55）。
+   * 取 max 的语义是"历史上至少创建过这么多"——历史累计值无法事后精确重算，
+   * 但绝不能比"当前还在库里的数量"还小；删除条目不回退，避免计数器来回抖动。
+   */
+  private async reconcileCounters(): Promise<void> {
+    if (this.meta === null) return
+    let entries = 0
+    let notes = 0
+    try {
+      entries = (await readdir(this.dirs.spaces)).filter((n) => n.endsWith('.md')).length
+    } catch {
+      /* 目录缺失 → 0 */
+    }
+    try {
+      const rels: string[] = []
+      await this.listMarkdownFiles(this.dirs.docs, '', rels)
+      notes = rels.length
+    } catch {
+      /* 目录缺失 → 0 */
+    }
+    const counters = this.meta.counters
+    let changed = false
+    if ((counters.entriesTotal ?? 0) < entries) {
+      counters.entriesTotal = entries
+      changed = true
+    }
+    if ((counters.notedTotal ?? 0) < notes) {
+      counters.notedTotal = notes
+      changed = true
+    }
+    if (changed) await this.writeMeta()
   }
 
   private async audit(op: string, detail: Record<string, unknown>): Promise<void> {
@@ -747,7 +786,10 @@ export class MemoryStore {
       return
     }
     for (const name of names.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-      const rel = join(prefix, name.name)
+      // v0.8.0（F2）：相对 key 一律用 '/'（posix）拼——Windows 上用 join 会产出 `notes\x.md`，
+      // 与向量侧 key（note() 已统一为 posix）对不上，导致 embedding 融合/去重静默失配。
+      // 文件系统路径仍用 join（见下行递归参数）。
+      const rel = prefix === '' ? name.name : `${prefix}/${name.name}`
       if (name.isDirectory()) {
         await this.listMarkdownFiles(join(dir, name.name), rel, out)
       } else if (name.isFile() && name.name.endsWith('.md')) {
@@ -1009,6 +1051,21 @@ export class MemoryStore {
     }
   }
 
+  /**
+   * v0.8.0（F3）：需要时重建索引后再取文档数。
+   * `IndexManager.get()` 会在「存在 .dirty 标记 / 脏写入超阈值 / 快照缺失或版本不符」时重建并落盘，
+   * 其余情况直接命中内存缓存——因此这里既不会每次扫描，也不会再报陈旧快照。
+   * 重建失败（磁盘/解析异常）→ null（status 会渲染成待重建告警）。
+   */
+  private async indexDocCountFresh(): Promise<number | null> {
+    try {
+      const index = await this.index.get(() => this.scanDocs())
+      return index.docCount
+    } catch {
+      return null
+    }
+  }
+
   async status(): Promise<StoreStatusSnapshot> {
     let l1 = 0
     let l2 = 0
@@ -1030,7 +1087,10 @@ export class MemoryStore {
     } catch {
       /* ignore */
     }
-    const snap = await this.index.snapshotDocCount()
+    // v0.8.0（F3）：status() 前先把"脏索引"顺手重建——v0.7.4 及以前这里只读快照，
+    // 于是只要写过一次，状态块就会永久显示「索引快照与库内不一致」，且 docCount 长期少报。
+    // 库量级只有几十~几百篇，重建是毫秒级；只有真正脏（含跨进程 .dirty 标记）时才发生。
+    const snap = await this.indexDocCountFresh()
     const empty = l3 === 0 && l2 === 0 && l1 === 0
     return {
       ready: true,

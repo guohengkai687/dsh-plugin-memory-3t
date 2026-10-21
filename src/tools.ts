@@ -1,4 +1,4 @@
-﻿/**
+/**
  * devmemory_* 工具定义。
  *
  * v0.7.0（实测驱动的工具瘦身，见 .memory/docs/notes/2026-09-23-memory-3t-token-cost-evaluation.md）：
@@ -14,6 +14,8 @@
  * schema 用纯 JSON 谱；output 一律 object-rooted 且带 render；
  * execute 内的路径参数全部经 store 的 safeJoin 防逃逸。
  */
+
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 import type { DigestEngine } from './digest.js'
 import { seedLibrary } from './seed.js'
@@ -57,8 +59,16 @@ function renderText(value: unknown): TextBlock[] {
   return [{ type: 'text', text: text(value) }]
 }
 
-export type StoreGetter = MemoryStore | (() => MemoryStore)
-export type EngineGetter = DigestEngine | (() => DigestEngine)
+/**
+ * 工具执行上下文的最小契约（v0.8.0，B1 跨工作区串库修复）：只依赖 DSH `ToolExecution.agent`。
+ * 缺省（MCP 桥接的 `execute(args, {})`、旧调用形态）时 getter 按旧行为解析（进程级库）。
+ */
+export interface ToolExecContext {
+  agent?: unknown
+}
+
+export type StoreGetter = MemoryStore | ((exec?: ToolExecContext) => MemoryStore)
+export type EngineGetter = DigestEngine | ((exec?: ToolExecContext) => DigestEngine)
 
 /** 低频运维动作：core 面合并进 `devmemory_admin`，full 面各自成工具。 */
 interface AdminAction {
@@ -80,11 +90,35 @@ export function createTools(
   engineOrGetter: EngineGetter,
   options: CreateToolsOptions = {},
 ): ToolDefinition[] {
-  /** 惰性取当前工作区的记忆库：getter 时每次调用求值（会话工作区切换后工具自动跟新库）。 */
-  const store = (): MemoryStore =>
-    typeof storeOrGetter === 'function' ? (storeOrGetter as () => MemoryStore)() : storeOrGetter
-  const engine = (): DigestEngine =>
-    typeof engineOrGetter === 'function' ? (engineOrGetter as () => DigestEngine)() : engineOrGetter
+  /**
+   * 本次调用已解析的库（v0.8.0）：工具体内的 `store()` / `engine()` 不带 exec，
+   * 靠 AsyncLocalStorage 取 wrapDiag 在调用入口按 exec.agent 解析好的实例——
+   * 这样 13 个工具体无需逐个改签名，也不会出现"解析一次、用到另一次"的漂移。
+   */
+  const callBinding = new AsyncLocalStorage<{ store: MemoryStore; engine: DigestEngine }>()
+
+  /**
+   * 惰性取库：显式 exec（工具执行入口）→ 交给 getter 按**调用方会话**解析；
+   * 缺省 → 优先用当前调用作用域内的绑定，其次才回落 getter 的进程级解析。
+   */
+  const store = (exec?: ToolExecContext): MemoryStore => {
+    if (exec === undefined) {
+      const bound = callBinding.getStore()
+      if (bound !== undefined) return bound.store
+    }
+    return typeof storeOrGetter === 'function'
+      ? (storeOrGetter as (exec?: ToolExecContext) => MemoryStore)(exec)
+      : storeOrGetter
+  }
+  const engine = (exec?: ToolExecContext): DigestEngine => {
+    if (exec === undefined) {
+      const bound = callBinding.getStore()
+      if (bound !== undefined) return bound.engine
+    }
+    return typeof engineOrGetter === 'function'
+      ? (engineOrGetter as (exec?: ToolExecContext) => DigestEngine)(exec)
+      : engineOrGetter
+  }
   const str = (args: Record<string, unknown>, key: string): string | undefined => {
     const v = args[key]
     return typeof v === 'string' ? v : undefined
@@ -129,12 +163,16 @@ export function createTools(
     return {
       ...tool,
       execute: async (args, exec) => {
-        const s = store()
+        // v0.8.0（B1）：先按本次调用的 exec.agent 解析库，再在该作用域里执行工具——
+        // 工具体内部的 store()/engine() 都会命中这里的绑定，多工作区并行不会串库。
+        const ctx: ToolExecContext = exec !== null && typeof exec === 'object' ? (exec as ToolExecContext) : {}
+        const s = store(ctx)
+        const e = engine(ctx)
         s.diag.noteUsage(tool.name)
         const op = tool.name === 'devmemory_admin' ? str(args ?? {}, 'op') : undefined
         const label = op !== undefined ? `${tool.name}:${op}` : tool.name
         try {
-          return await execute(args, exec)
+          return await callBinding.run({ store: s, engine: e }, () => execute(args, exec))
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           await s.diag
@@ -441,7 +479,7 @@ export function createTools(
       description: '诊断与异常记录（工具报错 / 降级路径 / 生命周期失败）：summary 汇总、list 明细、clear 清空。',
       properties: {
         action: { type: 'string', enum: ['summary', 'list', 'clear'], description: '默认 summary。' },
-        level: { type: 'string', enum: ['error', 'unexpected'] },
+        level: { type: 'string', enum: ['error', 'unexpected', 'info'] },
         tool: { type: 'string' },
         origin: { type: 'string' },
         days: { type: 'number' },
@@ -454,7 +492,7 @@ export function createTools(
         if (action === 'list') {
           const levelRaw = str(args, 'level')
           const events = await s.diag.list({
-            level: levelRaw === 'error' || levelRaw === 'unexpected' ? levelRaw : undefined,
+            level: levelRaw === 'error' || levelRaw === 'unexpected' || levelRaw === 'info' ? levelRaw : undefined,
             tool: str(args, 'tool'),
             origin: str(args, 'origin'),
             days: num(args, 'days'),

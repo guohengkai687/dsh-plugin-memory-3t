@@ -8,7 +8,8 @@
  * 设计要点：
  * - 存储：`<库>/diag/events.jsonl`（追加式 JSONL，0600），与三层记忆内容分离，
  *   不入 git 历史（vcs.ensureIgnore 忽略 diag/）、不随 pack 迁移（可重建）。
- * - 级别：`error`（调用异常/失败）/ `unexpected`（降级、回退、不符合预期的行为）。
+ * - 级别：`error`（调用异常/失败）/ `unexpected`（降级、回退、不符合预期的行为）/
+ *   `info`（v0.8.0：正常生命周期探测，如会话启动边升级——不再冒充 unexpected 污染告警）。
  * - 计数：内存计数惰性装载（首次访问扫一遍文件），后续 append 只增计数，status/boot
  *   读取零扫描；summary/list 才重新读文件做聚合。
  * - 上限：`diag.maxEvents`（默认 2000，0=不限）。事件数超过 2 倍上限时压缩，
@@ -23,7 +24,7 @@ import { dirname } from 'node:path'
 
 import { safeJoin } from './paths.js'
 
-export type DiagLevel = 'error' | 'unexpected'
+export type DiagLevel = 'error' | 'unexpected' | 'info'
 
 export interface DiagEvent {
   /** ISO 时间。 */
@@ -50,9 +51,12 @@ export interface DiagConfig {
 
 export interface DiagCounters {
   enabled: boolean
+  /** 全部事件条数（含 info）。 */
   total: number
   error: number
   unexpected: number
+  /** v0.8.0（F1）：正常生命周期探测（会话启动边升级等），不属于"异常/不符合预期"。 */
+  info: number
   firstTs: string | null
   lastTs: string | null
 }
@@ -73,6 +77,20 @@ const CAP_MESSAGE = 300
 const CAP_STACK = 600
 const CAP_ARGS = 300
 
+/**
+ * v0.8.0（F1/F5）：历史上把正常生命周期探测记成了 `unexpected`，这些旧事件在
+ * events.jsonl 里已经落盘。读取时按 message 归一化为 `info`（**只降级、不删证据**），
+ * 让旧文件里的噪声立刻停止计入异常告警；compaction 重写文件时顺手把级别写正。
+ * 新写入已直接记 info（index.ts 的会话启动边），这里是纯兼容层。
+ */
+const LEGACY_INFO_PATTERNS = [/^会话启动边=/, /^会话启动边升级：/, /^TEMP-DIAG/]
+
+/** 事件的**有效级别**：历史噪声降级为 info；其它按落盘级别。 */
+function normalizedLevel(event: DiagEvent): DiagLevel {
+  if (event.level === 'error' || event.level === 'info') return event.level
+  return LEGACY_INFO_PATTERNS.some((pattern) => pattern.test(event.message)) ? 'info' : 'unexpected'
+}
+
 function truncate(text: string, cap: number): string {
   return text.length > cap ? `${text.slice(0, cap)}…` : text
 }
@@ -84,6 +102,7 @@ export class DiagLog {
   private total = 0
   private errors = 0
   private unexpected = 0
+  private infos = 0
   private firstTs: string | null = null
   private lastTs: string | null = null
   private readonly usage = new Map<string, number>()
@@ -131,8 +150,10 @@ export class DiagLog {
         this.total += 1
         try {
           const e = JSON.parse(line) as DiagEvent
-          if (e.level === 'error') this.errors += 1
-          else if (e.level === 'unexpected') this.unexpected += 1
+          const level = normalizedLevel(e)
+          if (level === 'error') this.errors += 1
+          else if (level === 'unexpected') this.unexpected += 1
+          else this.infos += 1
           if (typeof e.ts === 'string') {
             if (this.firstTs === null || e.ts < this.firstTs) this.firstTs = e.ts
             if (this.lastTs === null || e.ts > this.lastTs) this.lastTs = e.ts
@@ -171,7 +192,8 @@ export class DiagLog {
     }
     this.total += 1
     if (input.level === 'error') this.errors += 1
-    else this.unexpected += 1
+    else if (input.level === 'unexpected') this.unexpected += 1
+    else this.infos += 1
     this.lastTs = event.ts
     if (this.firstTs === null) this.firstTs = event.ts
     try {
@@ -191,7 +213,16 @@ export class DiagLog {
     const raw = await readFile(this.file, 'utf8')
     const lines = raw.split(/\r?\n/).filter((l) => l.trim() !== '')
     if (lines.length <= max) return
-    const kept = lines.slice(lines.length - max)
+    // v0.8.0（F5）：重写时把历史噪声的级别写正（unexpected → info），下次读取无需再归一化
+    const kept = lines.slice(lines.length - max).map((line) => {
+      try {
+        const e = JSON.parse(line) as DiagEvent
+        const level = normalizedLevel(e)
+        return level === e.level ? line : JSON.stringify({ ...e, level })
+      } catch {
+        return line
+      }
+    })
     const tmp = `${this.file}.tmp`
     await writeFile(tmp, kept.length > 0 ? kept.join('\n') + '\n' : '', { mode: 0o600 })
     await rename(tmp, this.file)
@@ -199,6 +230,7 @@ export class DiagLog {
     this.total = kept.length
     this.errors = 0
     this.unexpected = 0
+    this.infos = 0
     this.firstTs = null
     this.lastTs = null
     for (const line of kept) {
@@ -206,6 +238,7 @@ export class DiagLog {
         const e = JSON.parse(line) as DiagEvent
         if (e.level === 'error') this.errors += 1
         else if (e.level === 'unexpected') this.unexpected += 1
+        else this.infos += 1
         if (typeof e.ts === 'string') {
           if (this.firstTs === null || e.ts < this.firstTs) this.firstTs = e.ts
           if (this.lastTs === null || e.ts > this.lastTs) this.lastTs = e.ts
@@ -229,6 +262,7 @@ export class DiagLog {
       total: this.total,
       error: this.errors,
       unexpected: this.unexpected,
+      info: this.infos,
       firstTs: this.firstTs,
       lastTs: this.lastTs,
     }
@@ -252,7 +286,7 @@ export class DiagLog {
         if (line.trim() === '') continue
         try {
           const e = JSON.parse(line) as DiagEvent
-          if (opts.level !== undefined && e.level !== opts.level) continue
+          if (opts.level !== undefined && normalizedLevel(e) !== opts.level) continue
           if (opts.tool !== undefined && e.tool !== opts.tool) continue
           if (opts.origin !== undefined && e.origin !== opts.origin) continue
           if (since !== null && new Date(e.ts).getTime() < since) continue
@@ -270,7 +304,7 @@ export class DiagLog {
   /** 汇总：分级/分工具/分来源计数 + 最近事件 + 本进程工具使用次数。 */
   async summary(): Promise<DiagSummary> {
     await this.loadCounts()
-    const byLevel: Record<DiagLevel, number> = { error: 0, unexpected: 0 }
+    const byLevel: Record<DiagLevel, number> = { error: 0, unexpected: 0, info: 0 }
     const byTool: Record<string, number> = {}
     const byOrigin: Record<string, number> = {}
     const recent: DiagEvent[] = []
@@ -280,8 +314,7 @@ export class DiagLog {
       for (const line of lines) {
         try {
           const e = JSON.parse(line) as DiagEvent
-          if (e.level === 'error') byLevel.error += 1
-          else if (e.level === 'unexpected') byLevel.unexpected += 1
+          byLevel[normalizedLevel(e)] += 1
           if (e.origin !== undefined) byOrigin[e.origin] = (byOrigin[e.origin] ?? 0) + 1
           if (e.tool !== undefined) byTool[e.tool] = (byTool[e.tool] ?? 0) + 1
         } catch {
@@ -309,6 +342,7 @@ export class DiagLog {
       total: this.total,
       error: this.errors,
       unexpected: this.unexpected,
+      info: this.infos,
       firstTs: this.firstTs,
       lastTs: this.lastTs,
       byLevel,
@@ -331,6 +365,7 @@ export class DiagLog {
     this.total = 0
     this.errors = 0
     this.unexpected = 0
+    this.infos = 0
     this.firstTs = null
     this.lastTs = null
     this.usage.clear()

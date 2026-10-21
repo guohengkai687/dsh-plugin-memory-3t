@@ -217,11 +217,16 @@ async function loadDiag() {
     const d = await getJSON('/dev-memory/api/diag');
     const s = d.summary || {};
     if (!s.enabled) { box.innerHTML = '<div class="empty">诊断记录已禁用（diag.enabled=false）。</div>'; return; }
-    const levelBadge = (l) => l === 'error' ? '<span class="badge" style="background:#3a1a1a;color:#e06c75">error</span>' : '<span class="badge warn">unexpected</span>';
+    const levelBadge = (l) => l === 'error'
+      ? '<span class="badge" style="background:#3a1a1a;color:#e06c75">error</span>'
+      : l === 'info'
+        ? '<span class="badge" style="background:#1a2a3a;color:#7f9ec4">info</span>'
+        : '<span class="badge warn">unexpected</span>';
     let html = '<div class="grid">' +
       '<div><div class="k">累计事件</div><div class="v">' + (s.total ?? 0) + '</div></div>' +
       '<div><div class="k">error（异常）</div><div class="v">' + (s.error ?? 0) + '</div></div>' +
       '<div><div class="k">unexpected（不符预期）</div><div class="v">' + (s.unexpected ?? 0) + '</div></div>' +
+      '<div><div class="k">info（正常探测）</div><div class="v">' + (s.info ?? 0) + '</div></div>' +
       '<div><div class="k">本进程工具调用</div><div class="v">' + Object.values(s.usage || {}).reduce((a, b) => a + b, 0) + '</div></div>' +
       '</div>';
     const recent = s.recent || [];

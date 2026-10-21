@@ -54,46 +54,40 @@ test('render(v0.6.6): clampTokens/clampEntrySummary 在短文本上必须终止�
   assert.equal(clampEntrySummary('极短文本', 0), '')
 })
 
-test('render: boot 块含数据非指令声明与工具指引', () => {
-  const out = renderBootBlock(STATUS, 2000)
+test('render: boot 块含数据非指令声明与工具指引（v0.8.0 起恒定，不含库根）', () => {
+  const out = renderBootBlock(2000)
   assert.ok(out.includes('数据'))
   assert.ok(out.includes('devmemory_recall'))
   assert.ok(out.includes('devmemory_remember'))
-  assert.ok(out.includes('库根：/x/.memory'))
+  // v0.8.0（B1）：boot 块经 systemPrompt 全局注册、拿不到当前会话 → 库根下放到每会话一次的 status 块
+  assert.ok(!out.includes('库根：'), out)
 })
 
-test('render: boot 块静态化——不同易变状态产出逐字节相同（不破坏 prefix 缓存）', () => {
-  const a = renderBootBlock(STATUS, 2000)
-  const b = renderBootBlock(
-    {
-      ...STATUS,
-      counts: { l1: 987, l2: 96, l3: 95 },
-      indexStale: true,
-      indexDocCount: 12,
-      diag: { enabled: true, total: 42, error: 7, unexpected: 35 },
-      vcs: { enabled: true, available: true, ready: true, branch: 'other', commits: 4242, pendingWrites: 17 },
-      embedding: { enabled: true, ready: true, degraded: false, model: 'm', vectorCount: 888 },
-    },
-    2000,
-  )
+test('render: boot 块静态化——同一预算下逐字节相同，且不含任何易变状态', () => {
+  const a = renderBootBlock(2000)
+  const b = renderBootBlock(2000)
   assert.equal(a, b, 'boot 块不得随条目数/提交数/待提交数/向量数/诊断数变化')
   // 显式反证：易变信息不得出现在 boot 块里（v0.6.5 前它们都在这里逐请求重复注入）
-  for (const volatile of ['L3 条目', '次提交', '待提交', '条向量', '索引快照与库内不一致', '累计']) {
+  // v0.8.0（B1）追加：库根也不再出现（多工作区并行会拿到别人的库根）
+  for (const volatile of ['L3 条目', '次提交', '待提交', '条向量', '索引快照与库内不一致', '累计', '库根：']) {
     assert.ok(!a.includes(volatile), `boot 块不应包含易变信息：${volatile}`)
   }
 })
 
-test('render: boot 块在库不可用时附降级告警（唯一非静态分支）', () => {
-  const out = renderBootBlock({ ...STATUS, availability: 'unavailable', unavailableReason: 'init 抛错' }, 2000)
-  assert.ok(out.includes('不可用'), '不可用时应显式告警: ' + out)
-  assert.ok(out.includes('init 抛错'))
-  // 正常态不得出现该告警
-  assert.ok(!renderBootBlock(STATUS, 2000).includes('不可用'))
+test('render: boot 块不看库状态（不可用告警在 status 块）', () => {
+  const out = renderBootBlock(2000)
+  assert.ok(!out.includes('不可用'), out)
+  const statusOut = renderStatusBlock({ ...STATUS, availability: 'unavailable', unavailableReason: 'init 抛错' }, 2000)
+  assert.ok(statusOut.includes('不可用'), '不可用时应由 status 块显式告警: ' + statusOut)
+  assert.ok(statusOut.includes('init 抛错'))
+  // 正常态 status 块同样不得出现该告警
+  assert.ok(!renderStatusBlock(STATUS, 2000).includes('不可用'))
 })
 
-test('render: boot 块 user scope 标注全局库', () => {
-  const out = renderBootBlock({ ...STATUS, root: 'C:/Users/x/.memory', scope: 'user', counts: { l1: 1, l2: 1, l3: 1 } }, 2000)
-  assert.ok(out.includes('库根：C:/Users/x/.memory（全局库，跨工作区共享）'))
+test('render: status 块标注库根（user scope 提示全局库）', () => {
+  const out = renderStatusBlock({ ...STATUS, root: 'C:/Users/x/.memory', scope: 'user' }, 2000)
+  assert.ok(out.includes('库根：C:/Users/x/.memory（全局库，跨工作区共享）'), out)
+  assert.ok(renderStatusBlock(STATUS, 2000).includes('库根：/x/.memory'))
 })
 
 test('render: status 块承载易变状态（计数 / VCS / 检索）', () => {

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * v0.4 诊断与异常记录（DiagLog）测试。
  *
  * - DiagLog 单元：追加落盘 / 计数惰性装载 / 汇总聚合（分级/分工具/分来源 + 最近 + usage）/
@@ -65,7 +65,7 @@ test('diag: summary 聚合（分级/分来源/分工具 + 最近事件）+ usage
     assert.equal(s.total, 3)
     assert.equal(s.error, 2)
     assert.equal(s.unexpected, 1)
-    assert.deepEqual(s.byLevel, { error: 2, unexpected: 1 })
+    assert.deepEqual(s.byLevel, { error: 2, unexpected: 1, info: 0 })
     assert.deepEqual(s.byOrigin, { tool: 2, vcs: 1 })
     assert.deepEqual(s.byTool, { devmemory_recall: 1, devmemory_note: 1 })
     assert.equal(s.recent.length, 3)
@@ -232,7 +232,8 @@ test('diag 集成: store.init 建 diag 目录；工具异常自动入记 + usage
     assert.ok('indexStale' in st, 'indexStale 必须出现在 devmemory_status 输出')
     assert.equal(typeof st.indexStale, 'boolean')
     assert.equal(st.indexStale, false, '空库无快照，不应判为陈旧')
-    assert.equal(st.indexDocCount, null, '空库尚无快照，应为 null')
+    // v0.8.0（F3）：status() 会顺手重建脏索引/建 miss 快照 → 空库真实文档数是 0（不再印 null 少报）
+    assert.equal(st.indexDocCount, 0, '空库真实文档数为 0')
 
     // devmemory_diag：summary 动作
     const summary = await diagTool.execute({})
@@ -275,7 +276,7 @@ test('diag 集成: 会话状态块仅在存在记录时附诊断提示行（boot
   const withoutDiag = renderStatusBlock(base, 2000)
   assert.ok(!withoutDiag.includes('devmemory_admin(op="diag")'))
   // 回归：boot 块（逐请求注入）必须静态，任何状态下都不得出现诊断计数
-  const boot = renderBootBlock({ ...base, diag: { enabled: true, total: 3, error: 1, unexpected: 2 } }, 2000)
+  const boot = renderBootBlock(2000)
   assert.ok(!boot.includes('devmemory_admin(op="diag")'))
   assert.ok(!boot.includes('累计'))
 })

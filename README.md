@@ -284,12 +284,29 @@ v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-me
 
 > 版本回落开关：`toolsProfile: 'full'` + `subagentInject: true` + `l1MaxCharsPerLine: 0` 即回到 v0.6.6 的注入/暴露行为（检索分改进无法关闭——它是纯排序质量修复，索引会自动重建）。
 
+## 多工作区隔离与索引瘦身（v0.8.0）
+
+2026-10-21 对两个真实库（`Harness` 的 84 篇 / `FlexOne014_master` 的 50 篇）做存储与用量审计，据此修掉 1 个会污染数据的严重缺陷和 6 个影响可用性的问题。**唯一破坏性变更**：索引快照 `schemaVersion` 3 → 4，旧 `index.json` 自动判废重建（无需手工迁移）。
+
+| 编号 | 问题（实证） | 处置 |
+|---|---|---|
+| **B1** | **多工作区串库**：同一 dsh 进程里 A/B 交替使用，B 会话的 `recall` 命中 A 库条目、`remember` 把内容写进 A 库（2026-10-12 14:42 的一条 Harness 教训落在 FlexOne 库，commit `e618948`）；同一会话的 runtime-context 里「库根」在 Harness / FlexOne 之间来回变（seq=11/230/465 vs 130/425）。根因：`ensureStore()` 的 `active` 是**进程级**单值（进程最后绑定的库），工具 getter 不传调用方会话，boot 块又读全局 `cachedStatus` | 工具 getter 改为 `(exec) => storeForCall(exec).store`，从宿主真实传入的 `exec.agent.session.header.cwd` 解析库根并走 `sessionContext` 守卫（`src/index.ts`）；`src/tools.ts` 用 `AsyncLocalStorage` 把本次调用的 store/engine 绑到执行期（13 个工具主体无需改签名）；boot 块改为**纯常量**，库根与不可用告警下放到每会话一次的 `renderStatusBlock`；删除全局 `cachedStatus` / `bootStatus()` |
+| **F1** | 正常生命周期探测被记成 `unexpected`：两个真实库共 **155 条**启动边/升级事件，占全部诊断事件 99%，把真实降级记录淹没 | 诊断新增 `info` 级；会话启动边与升级改记 `info`；`devmemory_diag`、WebUI 徽章/计数卡、状态块告警同步区分 |
+| **F5** | 已落盘的历史噪声（含已删代码留下的 `TEMP-DIAG`）永久计入异常 | 读取时按 `normalizedLevel()` 归正为 `info`，`compact()` 重写时顺手改写——**不删证据**，老库免手工清理 |
+| **F2** | Windows 上 L2 笔记 docKey 两侧分隔符不一致（索引侧 `l2:notes\x.md` vs 向量侧 `l2:notes/x.md`），embedding 融合对不上号 | `listMarkdownFiles()` 相对键统一 posix，三层 docKey 与向量键一致 |
+| **F3** | `index.json.dirty` 常驻 → `status()` 只读旧快照，状态块永久显示「索引快照与库内不一致」，`indexDocCount` 少报（82 vs 84） | `status()` 检测到脏标记先 `index.get(scan)` 重建再渲染；空库由 `null` 改为 `0` |
+| **F4** | 倒排把 ~40 字节 docKey 在每条 postings 里重复：82 篇库 `index.json` **1,444,099 B**、31,308 条 docKey 出现（≈18.5 KB/篇，规模化天花板） | 序号倒排：`docKeys: string[]` + `postings: { term: { docIndex: tf } }`，检索先建反查表；BM25/覆盖率/标题加权语义不变。同一快照换算 **1,444,099 → 413,536 B（0.286×，-71%）** |
+| **F6** | `meta.json` 计数落后真实库（35/24 vs 55/13）；`dist` 与源码新鲜度无校验；历史 tag 缺失 | 启动 `reconcileCounters()` 按磁盘实扫**只向上修正**；新增 `npm run verify:dist`；补 `v0.6.1`/`v0.6.4` tag（v0.7.1–0.7.3 无独立提交，不补假 tag）；版本统一 0.8.0 |
+
+> 升级提示：v0.8.0 首次访问各库时会重建 `index.json`（几十篇量级，毫秒级），`index.json` 体积随之下降；`diag/events.jsonl` 里的历史噪声不需要手工清理。
+
 ## 诊断与异常记录（v0.4）
 
 插件在**每次记忆管理调用**时自动记录两类内容到 `<库>/diag/events.jsonl`（默认开，`diag.enabled=false` 可整体关闭）：
 
 - **`error`（调用异常）**：`devmemory_*` 工具执行抛错（含工具名、参数摘要、错误信息、堆栈）、digest 失败待补做、记忆库初始化失败等。
 - **`unexpected`（不符合预期的行为）**：fail-open 降级路径（git 不可用、Ollama 未响应降级 BM25、会话视图装载降级）、恢复无变更、nudge 发送失败、WebUI/skill 注册失败等。
+- **`info`（正常探测，v0.8.0）**：会话启动边、`agent/created → agent/session-start` 升级等**正常**生命周期事件。这类事件此前按 `unexpected` 落盘，两个真实库合计 155 条（占 99%），把真正的降级记录淹没；v0.8.0 起单独计数、不参与状态块告警。
 
 使用一段时间后（积累到一定量），用 `devmemory_diag` 审查：
 
@@ -299,7 +316,7 @@ v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-me
 模型：devmemory_diag(action="clear")  # 清空记录，开启新一轮观察窗口
 ```
 
-- `devmemory_status` 与 WebUI 面板也会展示诊断计数与最近 5 条；boot 块在**存在记录时**附加一行提示（`devmemory_diag` 查看）。
+- `devmemory_status` 与 WebUI 面板也会展示诊断计数与最近 5 条；boot 块自 v0.8.0 起**完全恒定**（不再附带诊断提示——它随记录变化会破坏 prefix 缓存），库状态与诊断提示都在每会话一次的会话状态块里。
 - 记录**不入 git 历史**（库内 `.gitignore` 忽略 `diag/`）、**不随 pack 迁移**（可重建的操作数据）；`maxEvents` 默认 2000 条，超过 2 倍上限自动压缩只保留最新。
 - 防敏感：工具参数摘要截断（字符串参数 ≤ 60 字符），不会把完整记忆内容整段落盘。
 - 使用场景：插件用久了之后，先 `clear` 开一个干净观察窗，用一段，再 `summary`/`list` 看"哪个工具最容易出错、哪些降级路径高频出现"，据此优化插件或调整配置。

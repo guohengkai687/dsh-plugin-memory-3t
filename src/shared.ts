@@ -18,4 +18,4 @@ export const DEV_MEMORY_ENTRY_ID = 'dsh-plugin-memory-3t'
  * **重装插件但不重启 dsh 进程时，运行中的仍是旧模块**（新文件在磁盘上，进程里是旧的）——
  * 有这行日志才能一眼看出当前跑的到底是哪份代码。
  */
-export const PLUGIN_VERSION = '0.7.4'
+export const PLUGIN_VERSION = '0.8.0'

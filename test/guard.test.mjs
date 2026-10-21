@@ -37,8 +37,9 @@ test('guard: 三态可用性 empty → ok → unavailable（降级 ≠ 空库）
     assert.equal(bad.firstRun, false, 'unavailable 不应被当成 firstRun 语义')
 
     // 渲染层必须把"降级"讲清楚，且不得同时声称"空库"
-    const boot = renderBootBlock(bad, 2000)
-    assert.ok(boot.includes('不可用'), boot)
+    // v0.8.0（B1）：boot 块恒定（逐请求注入，不能带随会话变化的库状态），告警下放到 status 块
+    const boot = renderBootBlock(2000)
+    assert.ok(!boot.includes('不可用'), 'boot 块不得含库状态告警')
     const statusBlock = renderStatusBlock(bad, 2000)
     assert.ok(statusBlock.includes('不可用'), statusBlock)
     assert.ok(!statusBlock.includes('冷启动'), 'unavailable 不得同时提示"空库/冷启动"')

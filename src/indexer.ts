@@ -55,17 +55,24 @@ export interface IndexFile {
   builtAt: string
   docCount: number
   avgDocLen: number
+  /**
+   * v0.8.0（F4）：postings 里的数字键 → docKey 的映射（docIndex = 该数组下标）。
+   * 旧格式把 ~40 字节的 docKey 在**每条 posting** 里重复（19,235 条 postings 撑到 1.5MB/84 篇），
+   * 换成数字键后索引可缩到原来的 ~1/4，且不影响 BM25/覆盖率语义。
+   */
+  docKeys: string[]
   /** docKey -> 元数据（重建时从文件读回，启用作快照） */
   docs: Record<string, Omit<IndexEntry, 'tf' | 'text'>>
-  /** term -> { docKey: tf } */
-  postings: Record<string, Record<string, number>>
+  /** term -> { docIndex: tf }（数字键，见 docKeys 注释） */
+  postings: Record<string, Record<number, number>>
 }
 
 /**
- * v0.7.0：升到 3——索引元数据新增 `titleTf`（标题分词），旧快照判废重建；
- * 同时检索改为"BM25 × 覆盖率 × 标题命中"（见 `scored`）。
+ * v0.8.0：升到 4——postings 的键从 docKey 改为 docIndex（`docKeys` 数组下标）。
+ * 旧快照（3 及以下）一律判废重建；语义不变，只是体积。
+ * （v0.7.0 的 3 = 增加 titleTf；v0.6.1 的 2 = 键改为 docKey。）
  */
-export const INDEX_SCHEMA_VERSION = 3
+export const INDEX_SCHEMA_VERSION = 4
 
 const EN_WORD = /[A-Za-z0-9_]+/g
 const CJK_CHAR = /[\u4e00-\u9fff]/g
@@ -130,7 +137,12 @@ export function buildIndex(docs: IndexedDoc[]): IndexFile {
   const avgDocLen = docCount === 0 ? 1 : entries.reduce((sum, e) => sum + e.len, 0) / docCount
   const metaById: IndexFile['docs'] = {}
   const postings: IndexFile['postings'] = {}
+  // v0.8.0（F4）：倒排用文档序号而非 docKey——docKey 动辄 40 字节，重复在每条 posting 里
+  // 是索引膨胀的主因（84 篇 → 19,235 条 postings → 1.5MB）。序号键 + 一份 docKeys 表即可。
+  const docKeys: string[] = []
   for (const entry of entries) {
+    const docIndex = docKeys.length
+    docKeys.push(entry.docKey)
     metaById[entry.docKey] = {
       docKey: entry.docKey,
       layer: entry.layer,
@@ -144,10 +156,18 @@ export function buildIndex(docs: IndexedDoc[]): IndexFile {
     }
     for (const [term, tf] of Object.entries(entry.tf)) {
       const bucket = (postings[term] ??= {})
-      bucket[entry.docKey] = tf
+      bucket[docIndex] = tf
     }
   }
-  return { schemaVersion: INDEX_SCHEMA_VERSION, builtAt: new Date().toISOString(), docCount, avgDocLen, docs: metaById, postings }
+  return {
+    schemaVersion: INDEX_SCHEMA_VERSION,
+    builtAt: new Date().toISOString(),
+    docCount,
+    avgDocLen,
+    docKeys,
+    docs: metaById,
+    postings,
+  }
 }
 
 /** BM25 单查询评分（k1=1.2, b=0.75）。 */
@@ -260,12 +280,18 @@ export function searchIndex(
   const effective = queryTokens.filter((t) => index.postings[t] !== undefined).length
   const hits: RecallHit[] = []
   const docs = index.docs
+  // v0.8.0（F4）：postings 的键是文档序号，先建 docKey → docIndex 反查表
+  const docIndexByKey = new Map<string, number>()
+  for (let i = 0; i < index.docKeys.length; i++) docIndexByKey.set(index.docKeys[i]!, i)
   for (const [docKey, meta] of Object.entries(docs)) {
+    const docIndex = docIndexByKey.get(docKey)
+    if (docIndex === undefined) continue
     // 取该文档在各查询词倒排桶中的 tf（无桶 → 未命中）
     const ownTf: Record<string, number> = {}
     for (const token of queryTokens) {
       const bucket = index.postings[token]
-      if (bucket !== undefined && bucket[docKey] !== undefined) ownTf[token] = bucket[docKey]!
+      const tf = bucket === undefined ? undefined : bucket[docIndex]
+      if (tf !== undefined) ownTf[token] = tf
     }
     const raw = bm25Score(queryTokens, { len: meta.len, tf: ownTf }, idf, index.avgDocLen)
     if (raw <= 0) continue
@@ -326,6 +352,8 @@ export class IndexManager {
       const parsed = JSON.parse(raw) as IndexFile
       if (parsed.schemaVersion !== INDEX_SCHEMA_VERSION || typeof parsed.docCount !== 'number') return null
       if (parsed.docs === undefined || parsed.postings === undefined) return null
+      // v0.8.0（F4）：序号倒排必须带 docKeys 表，缺失/形状不对一律判废重建（防半截快照）
+      if (!Array.isArray(parsed.docKeys) || parsed.docKeys.length !== parsed.docCount) return null
       return parsed
     } catch {
       return null

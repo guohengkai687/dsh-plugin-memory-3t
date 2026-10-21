@@ -38,7 +38,7 @@ import { resolve } from 'node:path'
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
-import { approximateTokens, clampLines, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget, type StoreStatus } from './render.js'
+import { approximateTokens, clampLines, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget } from './render.js'
 import { seedLibrary } from './seed.js'
 import { resolveRoot } from './paths.js'
 import { loadMemorySkillContent, MEMORY_SKILL_DESCRIPTION, MEMORY_SKILL_INVOCATION, MEMORY_SKILL_NAME, MEMORY_SKILL_WHEN_TO_USE } from './skill.js'
@@ -165,7 +165,6 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   const rootAgents = new Map<string, object>()
   const nudgedSessions = new Set<string>()
   const sessionBuffer: SessionMessage[] = []
-  let cachedStatus: StoreStatus | null = null
   let initWarned = false
   /** WebUI 面板当前挂载的卸载函数（v0.5：设置页 live 重挂载用；null = 未挂载/已摘除）。 */
   let panelDispose: (() => void) | null = null
@@ -267,7 +266,6 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     void store
       .init()
       .then(async () => {
-        cachedStatus = await store.status()
         ctx.logger.info?.('[dev-memory] 记忆库就绪: ' + store.root)
       })
       .catch((error: unknown) => {
@@ -331,45 +329,14 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
 
   // ------------------------------------------------------------ boot context
 
-  /** boot 用的库状态：优先最近一次 status()，未就绪时给中性占位（不误报"不可用"）。 */
-  const bootStatus = (): StoreStatus => {
-    if (cachedStatus !== null) return cachedStatus
-    // v0.6.5：尚未跑到 status() 但库已明确标记不可用时，也要让 boot 块显式告警（降级 ≠ 空库）
-    const reason = active?.store.unavailableReason ?? null
-    return {
-      ready: false,
-      root: active?.store.root ?? '(未初始化)',
-      scope: config.scope,
-      counts: { l1: 0, l2: 0, l3: 0 },
-      lastDigestAt: null,
-      indexDirty: 0,
-      firstRun: true,
-      ...(reason !== null ? { availability: 'unavailable' as const, unavailableReason: reason } : {}),
-      vcs: {
-        enabled: config.vcs.enabled,
-        available: false,
-        ready: false,
-        branch: null,
-        commits: 0,
-        pendingWrites: active?.store.vcs.pendingWrites ?? 0,
-      },
-      embedding: {
-        enabled: config.embedding.enabled,
-        ready: false,
-        degraded: config.embedding.enabled,
-        model: config.embedding.model,
-        vectorCount: 0,
-      },
-      diag: { enabled: config.diag.enabled, total: 0, error: 0, unexpected: 0 },
-    }
-  }
-
-  // v0.6.5：本 context 只放**静态**协议文本（逐请求注入，但逐字节恒定 → 不破坏 prefix 缓存）。
-  // 召回内容（状态块 / L1 回放 / L3 top-k）不再从这里出去，见 pre-step 的每会话一次性注入。
+  // v0.8.0（B1）：boot 块**完全恒定**——不再携带库根/不可用告警。原因是 DSH 的
+  // systemPrompt.context 是进程级全局注册，text() 拿不到"当前会话"，只能读进程最后绑定的库，
+  // 多工作区并行会互相串根（曾有 A 会话显示 B 工作区库根的实证），且文本随会话变化会破坏
+  // prefix 缓存。库根与降级告警改由每会话一次的 renderStatusBlock 承担（store 已按会话解析）。
   ctx.systemPrompt.context({
     name: 'dev-memory-boot',
     order: -200,
-    text: () => renderBootBlock(bootStatus(), config.maxBootTokens),
+    text: () => renderBootBlock(config.maxBootTokens),
   })
 
   // ------------------------------------------------------------ 生命周期
@@ -405,11 +372,12 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     const upgradeOnly = provisional && !rerun
     if (upgradeOnly) {
       // created 先到、session-start 后到：只补记真实 source（这是核对 DSH 事件语义的现场证据）
+      // v0.8.0（F1）：正常生命周期探测记 info 级，不再冒充"不符合预期"污染诊断计数
       try {
         const { store } = ensureStore(sessionCwdOf(agent), { sessionContext: true })
         void store.diag
           .record({
-            level: 'unexpected',
+            level: 'info',
             origin: 'session',
             message: `会话启动边升级：agent/created → agent/session-start（source=${source || 'unknown'}）`,
           })
@@ -471,11 +439,11 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
           view.reminded = 2
         }
       }
-      cachedStatus = await store.status()
       // 2.5) v0.6.5：现场记录实际走到的边与 source（供核对 DSH 版本行为；clear/compact 重装也可见）
+      // v0.8.0（F1）：这是正常生命周期事件，记 info 级（v0.7.4 及以前误记 unexpected，诊断面板长期噪声）
       void store.diag
         .record({
-          level: 'unexpected',
+          level: 'info',
           origin: 'session',
           message: `会话启动边=${eventName} source=${source || 'unknown'}（视图${rerun ? '重装' : '装载'}）`,
         })
@@ -592,7 +560,8 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
           })
           .catch(() => undefined)
       }
-      cachedStatus = await store.status()
+      // v0.8.0（B1）：turn-stopping 不再刷新"全局 cachedStatus"（boot 块已恒定，无需它；
+      // 曾经的全局缓存正是跨工作区串根的传播面之一）
       await store.flushVcs('会话边界')
     } catch (error) {
       warn(`[dev-memory] digest 异常（已记录状态）: ${error instanceof Error ? error.message : String(error)}`)
@@ -631,7 +600,26 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
 
   // ------------------------------------------------------------ tools
 
-  for (const tool of createTools(() => ensureStore().store, () => ensureStore().engine, { profile: config.toolsProfile })) {
+  /**
+   * 工具调用所属会话的库（v0.8.0，B1 跨工作区串库修复）。
+   *
+   * DSH 调用工具时会传 `exec`（ToolExecution），其中 `agent` 就是**这次调用所属的会话**。
+   * 按它的 session.header.cwd 解析库根，工具读写才跟着调用方走——v0.7.4 及以前工具
+   * getter 不接 exec、只能读"进程最后绑定的 active"，多工作区并行时会读写到别人的库
+   * （10-12 实测：Harness 会话的 remember 写进了 FlexOne014_master 的库）。
+   * exec 缺失或无 agent（MCP 桥接 mcp.ts 的 execute(args, {})、headless 旧调用）
+   * → 回退原有解析（active / process.cwd），行为与旧版一致。
+   */
+  const storeForCall = (exec?: unknown) => {
+    const agent = isObject(exec) ? (exec as Record<string, unknown>).agent : undefined
+    return isObject(agent) ? ensureStore(sessionCwdOf(agent), { sessionContext: true }) : ensureStore()
+  }
+
+  for (const tool of createTools(
+    (exec) => storeForCall(exec).store,
+    (exec) => storeForCall(exec).engine,
+    { profile: config.toolsProfile },
+  )) {
     try {
       ctx.tools.register(tool)
     } catch (error) {

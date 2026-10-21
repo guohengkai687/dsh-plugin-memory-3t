@@ -1,4 +1,4 @@
-﻿import { test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -116,7 +116,10 @@ test('buildIndex: 按 docKey 建键，SearchHit 同时保留 docKey 与 id（v0.
   assert.ok(index.docs['l3:a'])
   assert.ok(index.docs['l2:n1'])
   assert.ok(index.docs['a'] === undefined, '不得再用 id 作为索引键')
-  assert.ok(index.postings['记忆']?.['l3:a'] !== undefined)
+  // v0.8.0（F4）：postings 用 docKeys 下标作键（不再重复完整 docKey）
+  const docIndex = index.docKeys.indexOf('l3:a')
+  assert.ok(docIndex >= 0)
+  assert.ok(index.postings['记忆']?.[docIndex] !== undefined)
   const hit = searchIndex(index, '记忆', 10)
   assert.equal(hit.l3[0].docKey, 'l3:a')
   assert.equal(hit.l3[0].id, 'a')
@@ -269,14 +272,15 @@ test('indexer(v0.7.0): 长文只沾一个高频词时，不得压过标题就讲
   assert.ok(result.l2[0].score > result.l2[1].score)
 })
 
-test('indexer(v0.7.0): schemaVersion=3 且旧快照判废', async () => {
-  assert.equal(INDEX_SCHEMA_VERSION, 3)
+test('indexer(v0.8.0): schemaVersion=4（序号倒排）且旧快照判废', async () => {
+  assert.equal(INDEX_SCHEMA_VERSION, 4)
   await withTmp(async (dir) => {
     const idxPath = join(dir, 'index.json')
-    await writeFile(idxPath, JSON.stringify({ schemaVersion: 2, docCount: 1, avgDocLen: 1, docs: {}, postings: {} }))
+    await writeFile(idxPath, JSON.stringify({ schemaVersion: 3, docCount: 1, avgDocLen: 1, docs: {}, postings: {} }))
     const mgr = new IndexManager(idxPath, 50)
     const idx = await mgr.get(async () => mkDocs(2))
-    assert.equal(idx.schemaVersion, 3)
+    assert.equal(idx.schemaVersion, 4)
+    assert.equal(idx.docKeys.length, 2, 'postings 的数字键必须能通过 docKeys 反查到 docKey')
     assert.ok(idx.docs['l3:e0'].titleTf !== undefined, 'meta 应带 titleTf')
   })
 })
