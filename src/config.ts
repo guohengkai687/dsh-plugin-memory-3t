@@ -89,8 +89,16 @@ export interface SeedConfig {
   maxEntries: number
 }
 
-/** v0.9.0：周演化阶段（顺序即执行顺序）。 */
-export type EvolveStageName = 'harvest' | 'reflect' | 'consolidate' | 'forget' | 'report'
+/** v0.9.0：周演化阶段（顺序即执行顺序）。v0.10.0 增加 evaluate / tune。 */
+export type EvolveStageName = 'harvest' | 'reflect' | 'consolidate' | 'forget' | 'evaluate' | 'tune' | 'report'
+
+/** v0.10.0：演化用 LLM 配置（provider/model 留空 = 用当前会话的模型）。 */
+export interface EvolveLlmConfig {
+  provider: string | null
+  model: string | null
+  maxTokens: number
+  timeoutMs: number
+}
 
 /** v0.9.0：周演化配置（设计见 docs/design/DESIGN-evolve-v0.9.md）。 */
 export interface EvolveConfig {
@@ -105,8 +113,19 @@ export interface EvolveConfig {
   harvest: { maxCandidates: number; minScore: number; minEvidence: number }
   /** 巩固时判定「重复」的相似度阈值（默认与 dedupe.threshold 一致）。 */
   dedupeThreshold: number
+  /** 提炼档位：heuristic（无 LLM）/ llm（v0.10.0 默认；失败自动回退启发式）。 */
   reflect: 'heuristic' | 'llm'
+  /** v0.10.0：LLM 路由与预算；provider/model 为空时用当前会话模型。 */
+  llm: EvolveLlmConfig
+  /** v0.10.0：相似度落在灰区（dedupeThreshold 以下）时让模型判「同一条事实还是两条」。 */
+  semanticMerge: boolean
   forget: { halfLifeDays: number; minAccessAgeDays: number; minSalience: number; maxPrune: number }
+  /** v0.10.0（P3）：把相似但不重复的条目自动互链。 */
+  link: { enabled: boolean; maxLinks: number }
+  /** v0.10.0（P2）：按回放指标微调阈值（默认关）。 */
+  tune: { enabled: boolean; maxDelta: number }
+  /** v0.10.0（P3）：演化作用域（workspace=当前工作区库 / user=全局库）。 */
+  scope: 'workspace' | 'user'
 }
 
 export interface VcsConfig {
@@ -252,11 +271,17 @@ export const DEFAULT_CONFIG: Config = {
     intervalDays: 7,
     windowDays: 7,
     dryRun: false,
-    stages: ['harvest', 'reflect', 'consolidate', 'forget', 'report'],
+    stages: ['harvest', 'reflect', 'consolidate', 'forget', 'evaluate', 'tune', 'report'],
     harvest: { maxCandidates: 20, minScore: 0.45, minEvidence: 2 },
     dedupeThreshold: 0.55,
-    reflect: 'heuristic',
+    // v0.10.0：默认走 LLM（= 当前会话模型）；模型不可用时自动回退启发式
+    reflect: 'llm',
+    llm: { provider: null, model: null, maxTokens: 800, timeoutMs: 60_000 },
+    semanticMerge: true,
     forget: { halfLifeDays: 90, minAccessAgeDays: 90, minSalience: 0.2, maxPrune: 50 },
+    link: { enabled: true, maxLinks: 5 },
+    tune: { enabled: false, maxDelta: 0.2 },
+    scope: 'workspace',
   },
 }
 
@@ -381,8 +406,8 @@ export const Config = z.object({
       windowDays: z.number().min(1).default(7),
       dryRun: z.boolean().default(false),
       stages: z
-        .array(z.union(['harvest', 'reflect', 'consolidate', 'forget', 'report']))
-        .default(['harvest', 'reflect', 'consolidate', 'forget', 'report']),
+        .array(z.union(['harvest', 'reflect', 'consolidate', 'forget', 'evaluate', 'tune', 'report']))
+        .default(['harvest', 'reflect', 'consolidate', 'forget', 'evaluate', 'tune', 'report']),
       harvest: z
         .object({
           maxCandidates: z.number().min(1).default(20),
@@ -391,7 +416,16 @@ export const Config = z.object({
         })
         .default({ maxCandidates: 20, minScore: 0.45, minEvidence: 2 }),
       dedupeThreshold: z.number().min(0).max(1).default(0.55),
-      reflect: z.union(['heuristic', 'llm']).default('heuristic'),
+      reflect: z.union(['heuristic', 'llm']).default('llm'),
+      llm: z
+        .object({
+          provider: z.union([z.string(), z.const(null)]).default(null),
+          model: z.union([z.string(), z.const(null)]).default(null),
+          maxTokens: z.number().min(1).default(800),
+          timeoutMs: z.number().min(1000).default(60_000),
+        })
+        .default({ provider: null, model: null, maxTokens: 800, timeoutMs: 60_000 }),
+      semanticMerge: z.boolean().default(true),
       forget: z
         .object({
           halfLifeDays: z.number().min(1).default(90),
@@ -400,17 +434,35 @@ export const Config = z.object({
           maxPrune: z.number().min(0).default(50),
         })
         .default({ halfLifeDays: 90, minAccessAgeDays: 90, minSalience: 0.2, maxPrune: 50 }),
+      link: z
+        .object({
+          enabled: z.boolean().default(true),
+          maxLinks: z.number().min(0).default(5),
+        })
+        .default({ enabled: true, maxLinks: 5 }),
+      tune: z
+        .object({
+          enabled: z.boolean().default(false),
+          maxDelta: z.number().min(0).max(1).default(0.2),
+        })
+        .default({ enabled: false, maxDelta: 0.2 }),
+      scope: z.union(['workspace', 'user']).default('workspace'),
     })
     .default({
       enabled: true,
       intervalDays: 7,
       windowDays: 7,
       dryRun: false,
-      stages: ['harvest', 'reflect', 'consolidate', 'forget', 'report'],
+      stages: ['harvest', 'reflect', 'consolidate', 'forget', 'evaluate', 'tune', 'report'],
       harvest: { maxCandidates: 20, minScore: 0.45, minEvidence: 2 },
       dedupeThreshold: 0.55,
-      reflect: 'heuristic',
+      reflect: 'llm',
+      llm: { provider: null, model: null, maxTokens: 800, timeoutMs: 60_000 },
+      semanticMerge: true,
       forget: { halfLifeDays: 90, minAccessAgeDays: 90, minSalience: 0.2, maxPrune: 50 },
+      link: { enabled: true, maxLinks: 5 },
+      tune: { enabled: false, maxDelta: 0.2 },
+      scope: 'workspace',
     }),
 })
 
@@ -458,6 +510,9 @@ export function mergeConfig(partial: unknown): Config {
   const evolve = (p.evolve ?? {}) as Record<string, unknown>
   const evolveHarvest = (evolve.harvest ?? {}) as Record<string, unknown>
   const evolveForget = (evolve.forget ?? {}) as Record<string, unknown>
+  const evolveLlm = (evolve.llm ?? {}) as Record<string, unknown>
+  const evolveLink = (evolve.link ?? {}) as Record<string, unknown>
+  const evolveTune = (evolve.tune ?? {}) as Record<string, unknown>
   const defaultIdentity = DEFAULT_CONFIG.vcs.identity
   const branch = typeof vcs.branch === 'string' && /^[a-zA-Z0-9._/-]+$/.test(vcs.branch.trim()) ? vcs.branch.trim() : DEFAULT_CONFIG.vcs.branch
   const vcsOut: VcsConfig = {
@@ -533,7 +588,13 @@ export function mergeConfig(partial: unknown): Config {
         Array.isArray(evolve.stages) && evolve.stages.length > 0
           ? (evolve.stages.filter(
               (s): s is EvolveStageName =>
-                s === 'harvest' || s === 'reflect' || s === 'consolidate' || s === 'forget' || s === 'report',
+                s === 'harvest' ||
+                s === 'reflect' ||
+                s === 'consolidate' ||
+                s === 'forget' ||
+                s === 'evaluate' ||
+                s === 'tune' ||
+                s === 'report',
             ) as EvolveStageName[])
           : [...DEFAULT_CONFIG.evolve.stages],
       harvest: {
@@ -545,7 +606,16 @@ export function mergeConfig(partial: unknown): Config {
         1,
         clampNonNegative(evolve.dedupeThreshold, clampNonNegative(dedupe.threshold, DEFAULT_CONFIG.evolve.dedupeThreshold)),
       ),
-      reflect: evolve.reflect === 'llm' ? 'llm' : 'heuristic',
+      reflect: evolve.reflect === 'heuristic' ? 'heuristic' : 'llm',
+      // v0.10.0：provider/model 留空 = 用当前会话模型；非空时作为显式路由覆盖
+      llm: {
+        provider:
+          typeof evolveLlm.provider === 'string' && evolveLlm.provider.trim() !== '' ? evolveLlm.provider.trim() : null,
+        model: typeof evolveLlm.model === 'string' && evolveLlm.model.trim() !== '' ? evolveLlm.model.trim() : null,
+        maxTokens: Math.max(1, Math.floor(clampNonNegative(evolveLlm.maxTokens, DEFAULT_CONFIG.evolve.llm.maxTokens))),
+        timeoutMs: Math.max(1000, clampNonNegative(evolveLlm.timeoutMs, DEFAULT_CONFIG.evolve.llm.timeoutMs)),
+      },
+      semanticMerge: evolve.semanticMerge !== false,
       forget: {
         halfLifeDays: Math.max(1, clampNonNegative(evolveForget.halfLifeDays, DEFAULT_CONFIG.evolve.forget.halfLifeDays)),
         minAccessAgeDays: Math.max(
@@ -555,6 +625,15 @@ export function mergeConfig(partial: unknown): Config {
         minSalience: Math.min(1, clampNonNegative(evolveForget.minSalience, DEFAULT_CONFIG.evolve.forget.minSalience)),
         maxPrune: Math.floor(clampNonNegative(evolveForget.maxPrune, DEFAULT_CONFIG.evolve.forget.maxPrune)),
       },
+      link: {
+        enabled: evolveLink.enabled !== false,
+        maxLinks: Math.floor(clampNonNegative(evolveLink.maxLinks, DEFAULT_CONFIG.evolve.link.maxLinks)),
+      },
+      tune: {
+        enabled: evolveTune.enabled === true,
+        maxDelta: Math.min(1, clampNonNegative(evolveTune.maxDelta, DEFAULT_CONFIG.evolve.tune.maxDelta)),
+      },
+      scope: evolve.scope === 'user' ? 'user' : 'workspace',
     },
   }
 }

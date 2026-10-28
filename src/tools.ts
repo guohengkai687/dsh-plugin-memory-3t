@@ -19,6 +19,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 import type { DigestEngine } from './digest.js'
 import { runEvolution } from './evolve.js'
+import type { LlmClient } from './llm.js'
 import type { EvolveStageName } from './config.js'
 import { seedLibrary } from './seed.js'
 import type { EntryKind, Importance, MemoryStore } from './store.js'
@@ -48,6 +49,8 @@ export type ToolsProfile = 'core' | 'full'
 export interface CreateToolsOptions {
   /** 默认 `core`（精简暴露面）；`full` = v0.6 的 12 个独立工具。 */
   profile?: ToolsProfile
+  /** v0.10.0：周演化用的 LLM 客户端工厂（adapter 在宿主侧注入；返回 null 则纯启发式）。 */
+  llmFactory?: () => LlmClient | null
 }
 
 const JSON_OBJECT_OUTPUT = { type: 'object', properties: {} } as const
@@ -98,6 +101,7 @@ export function createTools(
    * 这样 13 个工具体无需逐个改签名，也不会出现"解析一次、用到另一次"的漂移。
    */
   const callBinding = new AsyncLocalStorage<{ store: MemoryStore; engine: DigestEngine }>()
+  const llmFactory = options.llmFactory
 
   /**
    * 惰性取库：显式 exec（工具执行入口）→ 交给 getter 按**调用方会话**解析；
@@ -527,16 +531,17 @@ export function createTools(
     {
       tool: 'devmemory_evolve',
       op: 'evolve',
-      description: '周演化：采集流水→提炼 L3→合并→衰减归档→周报；dryRun 只出报告。',
+      description: '周演化：采集→提炼→合并→衰减→评估→调参→周报；dryRun 只出报告。',
       properties: {
         dryRun: { type: 'boolean', description: '只出报告不写库。' },
         windowDays: { type: 'number', description: '窗口天数（默认 7）。' },
         stages: { type: 'array', items: { type: 'string' }, description: '阶段子集（默认全部）。' },
+        llm: { type: 'boolean', description: '用当前会话模型提炼/判重（默认开）。' },
       },
       required: [],
       async execute(args) {
         const s = store()
-        const allowed: EvolveStageName[] = ['harvest', 'reflect', 'consolidate', 'forget', 'report']
+        const allowed: EvolveStageName[] = ['harvest', 'reflect', 'consolidate', 'forget', 'evaluate', 'tune', 'report']
         const requested = strArray(args, 'stages')
         const stages =
           requested === undefined
@@ -546,6 +551,7 @@ export function createTools(
           dryRun: bool(args, 'dryRun') === true,
           windowDays: num(args, 'windowDays'),
           ...(stages !== undefined && stages.length > 0 ? { stages } : {}),
+          llm: bool(args, 'llm') === false ? null : (llmFactory?.() ?? null),
         })
         return report ?? { skipped: 'disabled-or-already-running' }
       },

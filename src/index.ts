@@ -38,6 +38,7 @@ import { resolve } from 'node:path'
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
 import { evolutionDue, runEvolution } from './evolve.js'
+import { createLlmClient, sessionRouteOf, type LlmRoute } from './llm.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
 import { approximateTokens, clampLines, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget } from './render.js'
 import { seedLibrary } from './seed.js'
@@ -206,6 +207,8 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   // ------------------------------------------------------------ 记忆库（按工作区懒解析，v0.3.1）
 
   let active: { store: MemoryStore; engine: DigestEngine; root: string } | null = null
+  /** v0.10.0：最近一次会话的模型路由（手动 op=evolve 时作为「当前会话模型」的默认值）。 */
+  let latestSessionRoute: LlmRoute | undefined
   /**
    * 库根 → 已建实例的缓存（v0.6.3）。
    *
@@ -392,6 +395,7 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
       const sessionId = sessionIdOf(agent)
       const parent = parentSessionOf(agent)
       const previous = agentViews.get(agent)
+      latestSessionRoute = sessionRouteOf(agent) ?? latestSessionRoute
       // 1) 按会话真实工作区绑定库根（subagent 通常同工作区 → 命中 storeCache 实例，开销可忽略）
       const { store, engine } = ensureStore(sessionCwdOf(agent), { sessionContext: true })
       // 1.5) v0.6.5：冷启动 seed（**默认关**）。开启后库为空即自动生成项目骨架，
@@ -467,12 +471,20 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
       }
       // 5) v0.9.0：周演化懒触发——距上次运行 ≥ intervalDays 时后台跑一次，不阻塞首步。
       //    用本会话已解析的 store（B1 教训：禁止全局 active），失败只记诊断、不影响会话。
+      //    v0.10.0：默认用当前会话的大模型做提炼/语义合并；宿主没给 llm 服务就回退启发式。
       if (config.evolve.enabled && evolutionDue(store.evolveState, config.evolve)) {
-        void runEvolution(store, config.evolve)
+        const llm = createLlmClient({
+          service: (ctx as unknown as { llm?: unknown }).llm,
+          explicit: config.evolve.llm,
+          session: sessionRouteOf(agent),
+          defaultMaxTokens: config.evolve.llm.maxTokens,
+          defaultTimeoutMs: config.evolve.llm.timeoutMs,
+        })
+        void runEvolution(store, config.evolve, { llm })
           .then((report) => {
             if (report !== null) {
               ctx.logger.info?.(
-                `[dev-memory] 周演化完成：新增 ${report.consolidate.created.length} / 合并 ${report.consolidate.merged.length} / 归档 ${report.forget.archived.length}（${report.durationMs}ms）`,
+                `[dev-memory] 周演化完成：新增 ${report.consolidate.created.length} / 合并 ${report.consolidate.merged.length} / 互链 ${report.consolidate.linked.length} / 归档 ${report.forget.archived.length}（${report.durationMs}ms，提炼=${report.reflect.mode}）`,
               )
             }
           })
@@ -480,7 +492,7 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
             warn(`[dev-memory] 周演化失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
           })
       }
-      // 5) webServer 可能晚于插件 apply 才就绪 → 首次会话补一次面板挂载
+      // 6) webServer 可能晚于插件 apply 才就绪 → 首次会话补一次面板挂载
       ensurePanel()
     } catch (error) {
       // DSH 的会话启动边是 serial 且 listener 抛错会回滚 attach → 必须 fail-open，绝不向运行时抛错
@@ -634,7 +646,18 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
   for (const tool of createTools(
     (exec) => storeForCall(exec).store,
     (exec) => storeForCall(exec).engine,
-    { profile: config.toolsProfile },
+    {
+      profile: config.toolsProfile,
+      // v0.10.0：手动 op=evolve 也默认用当前会话模型；最近一次会话的路由在 handleSessionStart 里刷新
+      llmFactory: () =>
+        createLlmClient({
+          service: (ctx as unknown as { llm?: unknown }).llm,
+          explicit: config.evolve.llm,
+          session: latestSessionRoute,
+          defaultMaxTokens: config.evolve.llm.maxTokens,
+          defaultTimeoutMs: config.evolve.llm.timeoutMs,
+        }),
+    },
   )) {
     try {
       ctx.tools.register(tool)

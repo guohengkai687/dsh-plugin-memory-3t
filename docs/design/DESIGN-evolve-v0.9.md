@@ -290,7 +290,9 @@ evolve: {
 
 建议节奏：P0 上线后**先 dryRun 跑 2 周**，确认 diff 合理再开 `apply`；P2 至少积累 4 周指标后再开 `tune`。
 
-> **状态（2026-10-28）**：P0 已实现并发布 **v0.9.0**。落地规模：`src/evolve.ts` 501 行、`src/lifecycle.ts` 120 行、`bin/dev-memory-evolve.mjs` 84 行、`test/evolve.test.mjs` 253 行（8 个用例）、`docs/evolve.md` 67 行，另改 `src/config.ts`(+109) / `src/store.ts`(+190) / `src/tools.ts`(+33) / `src/index.ts`(+16)。P1/P2/P3 未开始。
+> **状态（2026-10-28）**：P0 已实现并发布 **v0.9.0**。落地规模：`src/evolve.ts` 501 行、`src/lifecycle.ts` 120 行、`bin/dev-memory-evolve.mjs` 84 行、`test/evolve.test.mjs` 253 行（8 个用例）、`docs/evolve.md` 67 行，另改 `src/config.ts`(+109) / `src/store.ts`(+190) / `src/tools.ts`(+33) / `src/index.ts`(+16)。
+>
+> **状态（2026-10-28，v0.10.0）**：P1/P2/P3 已实现并发布 **v0.10.0**。P1 落 `src/llm.ts`（宿主 `ctx.llm.prepareCall/stream`，默认用当前会话模型，失败回退启发式）+ 语义判重（灰区 `[0.3, dedupeThreshold)` 问 MERGE/KEEP，≤5 次/轮）。P2 落 `evaluate`（回放 `recall(..., {touch:false})` 算 `hit@5/waste@5`）+ `tune`（±10% 单步、`maxDelta` 封顶、变差回滚、历史进 `meta.evolve.tuning`，默认关）。P3 落灰区互链（`links`，≤`link.maxLinks` 对/轮）+ 周报自检段（重复对/孤岛/标签覆盖率/陈旧）。`EvolveStageName` 扩到 7 个；测试 `test/llm.test.mjs`（6）+ `test/evolve.test.mjs`（13），全量 224 通过。
 
 ## 12. 风险与开放问题
 

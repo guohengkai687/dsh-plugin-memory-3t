@@ -159,11 +159,14 @@ test('evolve(v0.9.0): evolutionDue / leaseActive / pickTags / 周报渲染', () 
       dryRun: true,
       durationMs: 1,
       stages: [{ name: 'harvest', ok: true, ms: 1, notes: ['ok'] }],
-      harvest: { scannedLines: 3, candidates: 1, accepted: 1 },
-      reflect: { drafts: 1 },
-      consolidate: { created: ['ctx-1'], merged: [], skipped: 0 },
+      harvest: { scannedLines: 3, candidates: 1, accepted: 1, minScore: 0.45 },
+      reflect: { drafts: 1, mode: 'llm' },
+      consolidate: { created: ['ctx-1'], merged: [{ id: 'ctx-2', from: 'x', how: 'semantic' }], skipped: 0, linked: [{ a: 'ctx-1', b: 'ctx-3' }] },
       forget: { decayed: 1, archived: [], skipped: 0 },
-      metrics: { entries: 2, churn: 0.5, coverage: 1, archiveRate: 0, indexKBPerEntry: 1.2, hitAt5: 'P2', wasteAt5: 'P2' },
+      metrics: { entries: 2, churn: 0.5, coverage: 1, archiveRate: 0, indexKBPerEntry: 1.2, hitAt5: 0.75, wasteAt5: 0.25 },
+      audit: { duplicates: 1, orphans: 2, tagCoverage: 0.5, stale: 0 },
+      tune: { applied: true, minScore: 0.41, dedupeThreshold: 0.55, action: 'lower-minScore' },
+      llm: { used: true, source: 'session', route: 'deepseek/deepseek-chat', calls: 2, failures: 0 },
       report: { path: null, markdown: '' },
       errors: [],
     },
@@ -171,6 +174,9 @@ test('evolve(v0.9.0): evolutionDue / leaseActive / pickTags / 周报渲染', () 
   assert.match(markdown, /# 周复盘 2026-10-28/)
   assert.match(markdown, /dry-run/)
   assert.match(markdown, /ctx-1/)
+  assert.match(markdown, /hit@5（回放召回） \| 75%/)
+  assert.match(markdown, /deepseek\/deepseek-chat/)
+  assert.match(markdown, /lower-minScore/)
 })
 
 // ---------------------------------------------------------------- 集成
@@ -198,7 +204,7 @@ test('evolve(v0.9.0): dry-run 不写库，正式运行写 L3 + 周报 + 演化�
   const run = await runEvolution(store, store.config.evolve, { now })
   assert.ok(run !== null)
   assert.equal(run.dryRun, false)
-  assert.equal(run.stages.length, 5)
+  assert.equal(run.stages.length, 7)
   assert.ok(run.stages.every((s) => s.ok), `阶段失败: ${JSON.stringify(run.stages)}`)
   const after = await store.listEntries()
   assert.ok(after.length > before.length, '正式运行应新增 L3')
@@ -279,4 +285,105 @@ test('evolve(v0.9.0): CLI 入口 --dry-run --json 不写库', async (t) => {
   const bad = spawnSync(process.execPath, [CLI, '--root', root, '--stages', 'nope'], { encoding: 'utf8' })
   assert.notEqual(bad.status, 0)
   assert.match(bad.stderr, /未知阶段/u)
+})
+
+// ---------------------------------------------------------------- v0.10.0（P1–P3）
+
+/** 假的 LLM 客户端（形状与 dist/llm.js 的 LlmClient 一致）。 */
+function fakeLlm(complete, route = { provider: 'deepseek', model: 'deepseek-chat' }) {
+  return { route, source: 'session', complete }
+}
+
+test('evolve(v0.10.0): LLM 提炼解析 JSON 并落库，调用计入报告', async (t) => {
+  const { root, store } = await makeStore(looseConfig({ stages: ['harvest', 'reflect', 'consolidate', 'report'] }))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const now = new Date('2026-10-28T00:00:00.000Z')
+  await store.appendRuntime(new Date('2026-10-27T10:00:00.000Z'), '- user: 记住：所有提交必须走 pnpm，不要引入新的运行时依赖。')
+  const seen = []
+  const llm = fakeLlm(async (request) => {
+    seen.push(request)
+    return '```json\n[{"index":0,"kind":"decision","summary":"提交统一用 pnpm","content":"所有提交都必须走 pnpm，不引入新的运行时依赖。","tags":["pnpm","依赖"]}]\n```'
+  })
+  const run = await runEvolution(store, store.config.evolve, { now, llm })
+  assert.ok(run !== null)
+  assert.equal(run.reflect.mode, 'llm')
+  assert.equal(run.llm.calls, 1)
+  assert.equal(run.llm.failures, 0)
+  assert.equal(run.llm.source, 'session')
+  assert.match(seen[0].system, /长期记忆/u)
+  const entries = await store.listEntries()
+  assert.ok(entries.some((entry) => entry.summary === '提交统一用 pnpm'))
+})
+
+test('evolve(v0.10.0): LLM 失败时回退启发式且不中断', async (t) => {
+  const { root, store } = await makeStore(looseConfig({ stages: ['harvest', 'reflect', 'consolidate', 'report'] }))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const now = new Date('2026-10-28T00:00:00.000Z')
+  await store.appendRuntime(new Date('2026-10-27T10:00:00.000Z'), '- user: 记住：所有提交必须走 pnpm，不要引入新的运行时依赖。')
+  const llm = fakeLlm(async () => {
+    throw new Error('boom')
+  })
+  const run = await runEvolution(store, store.config.evolve, { now, llm })
+  assert.ok(run !== null)
+  assert.equal(run.reflect.mode, 'heuristic')
+  assert.ok(run.reflect.drafts > 0)
+  assert.equal(run.llm.failures, 1)
+  assert.equal(run.errors.length, 0, 'LLM 失败不应算演化错误')
+  assert.ok((await store.listEntries()).length > 0, '回退启发式仍应写入')
+})
+
+test('evolve(v0.10.0): evaluate 回放传 touch:false，不污染 accesses 且给出 hit@5', async (t) => {
+  const { root, store } = await makeStore(looseConfig({ stages: ['harvest', 'evaluate'], reflect: 'heuristic' }))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const now = new Date('2026-10-28T00:00:00.000Z')
+  const entry = await store.remember({ kind: 'decision', content: '提交必须走 pnpm，锁文件一起提交。' })
+  await store.appendRuntime(new Date('2026-10-27T10:00:00.000Z'), '- user: 提交必须走 pnpm 这件事还记得吗')
+  const before = await store.readEntry(entry.id)
+  const run = await runEvolution(store, store.config.evolve, { now, llm: null })
+  assert.ok(run !== null)
+  assert.equal(typeof run.metrics.hitAt5, 'number')
+  assert.equal(typeof run.metrics.wasteAt5, 'number')
+  const after = await store.readEntry(entry.id)
+  assert.equal(after.accesses, before.accesses, '回放不得增加 accesses')
+})
+
+test('evolve(v0.10.0): tune 在 hit@5 偏低时记录动作并落盘 tuning', async (t) => {
+  const { root, store } = await makeStore(
+    looseConfig({ stages: ['harvest', 'evaluate', 'tune'], reflect: 'heuristic', tune: { enabled: true, maxDelta: 0.2 } }),
+  )
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const now = new Date('2026-10-28T00:00:00.000Z')
+  await store.appendRuntime(new Date('2026-10-27T10:00:00.000Z'), '- user: 库根串库的问题应该怎么排查才不会再写错库')
+  const run = await runEvolution(store, store.config.evolve, { now, llm: null })
+  assert.ok(run !== null)
+  assert.equal(run.tune.action, 'lower-minScore')
+  const tuning = store.evolveState.tuning
+  assert.ok(tuning !== undefined, 'tuning 应写入 meta')
+  assert.equal(tuning.history.length, 1)
+  assert.equal(tuning.history[0].action, 'lower-minScore')
+})
+
+test('evolve(v0.10.0): 灰区相似条目被互链（不合并）', async (t) => {
+  const { root, store } = await makeStore(looseConfig({ stages: ['consolidate'], reflect: 'heuristic' }))
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+  const now = new Date('2026-10-28T00:00:00.000Z')
+  const a = await store.remember({ kind: 'decision', content: '所有提交必须走 pnpm 而不是 npm，锁文件要一起提交' })
+  const b = await store.remember({ kind: 'decision', content: '所有提交必须走 pnpm 而不是 npm，CI 里也要用 pnpm 安装依赖' })
+  const run = await runEvolution(store, store.config.evolve, { now, llm: null })
+  assert.ok(run !== null)
+  assert.ok(run.consolidate.linked.length >= 1, `未互链：${JSON.stringify(run.consolidate)}`)
+  const entries = await store.listEntries()
+  const linkedA = entries.find((entry) => entry.id === a.id)
+  assert.ok(linkedA.links.includes(b.id))
+  assert.equal(entries.length, 2, '互链不应新建或合并条目')
 })

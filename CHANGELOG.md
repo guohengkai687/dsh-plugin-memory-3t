@@ -3,6 +3,36 @@
 本文件记录 dsh-plugin-memory-3t 的版本变更。版本号与 `package.json` / `src/shared.ts`
 的 `PLUGIN_VERSION` 一致（`test/version.test.mjs` 断言），发版打 `v<version>` tag。
 
+## v0.10.0 — 2026-10-28
+
+**主题：周演化 P1–P3**——把「无 LLM 闭环」升级成「用当前会话大模型提炼与判重、用回放指标自调阈值、顺手互链与自检」的闭环。设计文档：`docs/design/DESIGN-evolve-v0.9.md`；运维指南：`docs/evolve.md`。
+
+### 新增
+
+- **P1 LLM 提炼**（`src/llm.ts` + `src/evolve.ts#reflectWithLlm`）：默认 `reflect: 'llm'`，走宿主 `ctx.llm.prepareCall({provider,model,maxTokens}, signal)` → `call.stream({...call.config, system, messages, signal})`，路由取**当前会话模型**（`agent.session.header.config`），可用 `config.evolve.llm.{provider,model}` 覆盖。模型只回 JSON 数组（`index/kind/summary/content/tags`），解析用 `extractJson`（容忍 ```json 围栏与前后废话）；越界 index、空 summary、坏 JSON 一律丢弃。无服务/无路由/超时/额度失败 → **自动回退启发式**并记 `report.llm.failures`，不计入演化错误。
+- **P1 语义判重**：字面相似度落在 `[0.3, dedupeThreshold)` 且 `semanticMerge: true` 时，让模型答 `MERGE`/`KEEP`（单轮 ≤5 次），MERGE 记 `how: 'semantic'`。
+- **P2 回放评估**（`evaluate`）：本周真实用户提问（≤8 条）回放进 `recall(q, { maxResults: 5, touch: false })`，得 `hit@5` 与 `waste@5`；**回放不增 `accesses`**，避免自证式污染。
+- **P2 阈值调参**（`tune`，默认关）：按指标 ±10% 调 `minScore`，单次 ≤`maxDelta`（0.2），比上轮 `hit@5` 降 >0.02 回滚基线；历史存 `meta.json#evolve.tuning`（最近 20 条）。
+- **P3 互链**：活跃条目两两相似度 ∈ `[0.3, dedupeThreshold)` 且未链接 → 贪心取前 `link.maxLinks`（默认 5）对写 `links`。
+- **P3 自检**：周报新增「自检」段——重复对、孤岛（无互链）、标签覆盖率（≥2 标签）、陈旧条目。
+- **阶段扩展**：`harvest/reflect/consolidate/forget/evaluate/tune/report` 共 7 个，可单独跑（`--stages` / `op=evolve stages`）。
+- **周报**：新增「指标 hit@5/waste@5」「自检」「调参」「LLM」「互链」段。
+- **配置**：`config.evolve` 新增 `llm{provider,model,maxTokens,timeoutMs}`、`semanticMerge`、`link{enabled,maxLinks}`、`tune{enabled,maxDelta}`、`scope`；`reflect` 默认 `'llm'`。
+- **工具面**：`devmemory_evolve` / `devmemory_admin(op="evolve")` 新增 `llm` 开关（`llm=false` 强制启发式）。
+
+### 安全与回滚
+
+- LLM 只产"草案"，落库仍走 `MemoryStore`；`dryRun` 下 LLM 调用也不发生写盘。
+- LLM 不可用/返回垃圾 → 回退启发式，演化不中断（`report.llm.failures` 可见）。
+- tune 小步调整且变差自动回滚，不会把阈值调飞。
+- 每轮仍是一个 `[evolve]` commit，`git revert` 整体回滚。
+
+### 测试
+
+- 新增 `test/llm.test.mjs`（6 个用例：extractJson、sessionRouteOf、resolveRoute 优先级、无服务/无路由返回 null、prepareCall+stream 拼接、finish=error 抛错）。
+- `test/evolve.test.mjs` 扩到 13 个用例（新增：LLM 提炼落库、LLM 失败回退、evaluate 不污染 accesses、tune 动作与落盘、灰区互链）。
+- 全量 **224 tests / 224 pass / 0 fail / 0 skip**。
+
 ## v0.9.0 — 2026-10-28
 
 **主题：周演化（自学习闭环 P0）**——让库每周自己"复盘"一次：把 L1 流水里反复出现、被显式强调的内容提炼成 L3，合并重复条目，衰减并归档死记录，产出一份周报。设计文档：`docs/design/DESIGN-evolve-v0.9.md`；运维指南：`docs/evolve.md`。

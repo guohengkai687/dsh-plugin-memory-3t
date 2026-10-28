@@ -106,6 +106,13 @@ export interface MetaFile {
   evolve?: EvolveState
 }
 
+/** v0.10.0（P2）：阈值自调状态（tune 阶段落地；baseline 用于回滚）。 */
+export interface TuningState {
+  baseline: { minScore: number; dedupeThreshold: number }
+  current: { minScore: number; dedupeThreshold: number }
+  history: Array<{ at: string; hitAt5: number | null; minScore: number; dedupeThreshold: number; action: string }>
+}
+
 /** v0.9.0：周演化运行状态（持久化在 meta.json，跨进程可见）。 */
 export interface EvolveState {
   /** 最近一次成功/失败运行的时间（ISO）；从未运行过为 null。 */
@@ -116,6 +123,8 @@ export interface EvolveState {
   running: string | null
   /** 累计运行次数。 */
   runs: number
+  /** v0.10.0：tune 阶段当前的阈值与回滚基线（缺省 = 未调过）。 */
+  tuning?: TuningState
 }
 
 export const EMPTY_EVOLVE_STATE: EvolveState = {
@@ -129,12 +138,46 @@ export const EMPTY_EVOLVE_STATE: EvolveState = {
 function normalizeEvolveState(value: unknown): EvolveState {
   const raw = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
   const outcome = raw.lastOutcome === 'ok' || raw.lastOutcome === 'partial' || raw.lastOutcome === 'error' ? raw.lastOutcome : null
-  return {
+  const state: EvolveState = {
     lastRunAt: typeof raw.lastRunAt === 'string' ? raw.lastRunAt : null,
     lastOutcome: outcome,
     lastError: typeof raw.lastError === 'string' ? raw.lastError : null,
     running: typeof raw.running === 'string' ? raw.running : null,
     runs: typeof raw.runs === 'number' && Number.isFinite(raw.runs) ? Math.max(0, Math.floor(raw.runs)) : 0,
+  }
+  const tuning = normalizeTuningState(raw.tuning)
+  if (tuning !== undefined) state.tuning = tuning
+  return state
+}
+
+/** v0.10.0：归一化 tune 状态（字段不全即视为未调过，宁可不生效也不套错阈值）。 */
+function normalizeTuningState(value: unknown): TuningState | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  const baseline = raw.baseline as Record<string, unknown> | undefined
+  const current = raw.current as Record<string, unknown> | undefined
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null)
+  const baseMin = num(baseline?.minScore)
+  const baseDedupe = num(baseline?.dedupeThreshold)
+  const curMin = num(current?.minScore)
+  const curDedupe = num(current?.dedupeThreshold)
+  if (baseMin === null || baseDedupe === null || curMin === null || curDedupe === null) return undefined
+  const history = Array.isArray(raw.history)
+    ? raw.history
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => ({
+          at: typeof item.at === 'string' ? item.at : '',
+          hitAt5: typeof item.hitAt5 === 'number' && Number.isFinite(item.hitAt5) ? item.hitAt5 : null,
+          minScore: num(item.minScore) ?? curMin,
+          dedupeThreshold: num(item.dedupeThreshold) ?? curDedupe,
+          action: typeof item.action === 'string' ? item.action : '',
+        }))
+        .slice(-20)
+    : []
+  return {
+    baseline: { minScore: baseMin, dedupeThreshold: baseDedupe },
+    current: { minScore: curMin, dedupeThreshold: curDedupe },
+    history,
   }
 }
 

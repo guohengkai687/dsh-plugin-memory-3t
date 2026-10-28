@@ -301,19 +301,23 @@ v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-me
 
 > 升级提示：v0.8.0 首次访问各库时会重建 `index.json`（几十篇量级，毫秒级），`index.json` 体积随之下降；`diag/events.jsonl` 里的历史噪声不需要手工清理。
 
-## 周演化（v0.9.0，P0）
+## 周演化（v0.9.0 起；v0.10.0 加 P1–P3）
 
-库会随会话自动增长（L1 流水每天追加），但**"记下来"不等于"学进去"**：v0.8.0 审计的两个真实库里，55 条 L3 有 20 条从未被检索过，L2 只有零星几篇。v0.9.0 引入**每周一次的自演化闭环**（设计见 `docs/design/DESIGN-evolve-v0.9.md`），默认无 LLM、纯启发式，不产生额外模型调用。
+库会随会话自动增长（L1 流水每天追加），但**"记下来"不等于"学进去"**：v0.8.0 审计的两个真实库里，55 条 L3 有 20 条从未被检索过，L2 只有零星几篇。v0.9.0 引入**每周一次的自演化闭环**（设计见 `docs/design/DESIGN-evolve-v0.9.md`），v0.10.0 把提炼与判重升级到**当前会话的大模型**，并加入回放评估、阈值自调、条目互链与库自检。
 
-### 五个阶段
+### 七个阶段
 
 | 阶段 | 做什么 | 写什么 |
 |---|---|---|
-| harvest | 扫最近 `windowDays`（默认 7）天的 L1 流水，剔除注入噪声/系统提示，按话题聚类打分（频次 0.35 / 显式"记住·决策·教训" 0.25 / 新近度 0.20 / 新颖度 0.10 / 复现度 0.10），只留 ≥`minEvidence` 2 个独立来源且 ≥`minScore` 0.45 的候选 | 无（只产候选） |
-| reflect | 启发式档：候选直接落到 L3（`kind` 按内容判断），标签取高频词前 4 | 无 |
-| consolidate | 与现有 active L3 做 Jaccard 相似度：≥`dedupeThreshold` 0.55 时**合并**（tags 并集、accesses 相加、salience 取高、`mergedFrom` 记来源），否则新建 | L3 新建/合并 |
+| harvest | 扫最近 `windowDays`（默认 7）天的 L1 流水，剔除注入噪声/系统提示，按话题聚类打分（频次 0.35 / 显式"记住·决策·教训" 0.25 / 新近度 0.20 / 新颖度 0.10 / 复现度 0.10），只留 ≥`minEvidence` 2 个独立来源且 ≥`minScore` 0.45 的候选；同时留最多 8 条用户提问给 P2 回放 | 无（只产候选） |
+| reflect | `reflect: 'llm'`（默认）时把候选与现有 L3 标题一起交给**当前会话模型**，只收 JSON（`index/kind/summary/content/tags`）；无服务/无路由/超时/坏 JSON 自动回退启发式并记 `llm.failures` | 无 |
+| consolidate | 与现有 active L3 比 Jaccard：≥`dedupeThreshold` 0.55 **合并**（tags 并集、accesses 相加、salience 取高、`mergedFrom` 记来源）；落在 `[0.3, 0.55)` 的灰区可用 LLM 判 `MERGE/KEEP`（单轮 ≤5 次）；最后对灰区条目做**互链**（≤`link.maxLinks` 对） | L3 新建/合并 + `links` |
 | forget | `s' = clamp01(s·0.5^(Δt/90) + min(0.3, 0.05·窗口访问数))`；零访问 + 超 90 天 + salience < 0.2 的条目**归档**到 `spaces/archive/YYYY-MM/`（不删除、可恢复），单轮最多 `maxPrune` 50 条 | L3 归档 + salience 更新 |
-| report | 写周报 `docs/notes/YYYY-MM-DD-weekly-review.md`（指标 + 新增/合并/归档明细 + 成本），并重建索引 | L2 周报 |
+| evaluate | 把本周真实提问回放进 `recall(..., { touch: false })`，算 `hit@5`（有词面交集的查询占比）与 `waste@5`（低于 top×0.3 的命中占比）；**回放不增 accesses** | 无（只出指标） |
+| tune | 默认关；开启后按指标单步 ±10% 调 `minScore`，单次变化 ≤`tune.maxDelta`，比上轮 `hit@5` 降 >0.02 自动回滚基线，历史存 `meta.json#evolve.tuning` | 阈值 |
+| report | 写周报 `docs/notes/YYYY-MM-DD-weekly-review.md`（指标 hit@5/waste@5 + 新增/合并/归档明细 + LLM 路由与调用数 + 互链 + 自检 + 调参 + 成本），并重建索引 | L2 周报 |
+
+自检项（写进周报）：重复对（≥`dedupeThreshold` 但未合并）、孤岛条目（无互链）、标签覆盖率（≥2 标签）、陈旧条目（零访问且超过归档年龄）。
 
 整轮结束由插件执行 `flushVcs('[evolve] weekly YYYY-MM-DD')` 生成**一个** git commit；单条变更仍可用 `devmemory_admin(op="history"/"diff")` 追溯。
 
@@ -331,12 +335,18 @@ v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-me
 | `intervalDays` | `7` | 距上次成功运行多少天后触发 |
 | `windowDays` | `7` | 采集窗口 |
 | `dryRun` | `false` | 只出报告不写库（**建议老库首次先滚两周**） |
-| `stages` | 五项全开 | 阶段子集，如 `["harvest","report"]` |
+| `stages` | 七项全开 | 阶段子集，如 `["harvest","report"]` |
 | `harvest.maxCandidates` | `20` | 单轮候选上限 |
-| `harvest.minScore` | `0.45` | 候选及格线 |
+| `harvest.minScore` | `0.45` | 候选及格线（tune 开启后会被微调） |
 | `harvest.minEvidence` | `2` | 至少几个独立日期提到 |
 | `dedupeThreshold` | `0.55`（继承 `dedupe.threshold`） | 合并阈值 |
-| `reflect` | `'heuristic'` | P0 只实现启发式；`'llm'` 为 P1 预留 |
+| `reflect` | `'llm'` | `'llm'` 用当前会话模型提炼；`'heuristic'` 纯本地 |
+| `llm.provider` / `llm.model` | `null`（= 当前会话） | 显式覆盖模型路由 |
+| `llm.maxTokens` / `llm.timeoutMs` | `800` / `60000` | 单次调用预算 |
+| `semanticMerge` | `true` | 灰区相似条目是否让模型判 MERGE/KEEP |
+| `link.enabled` / `link.maxLinks` | `true` / `5` | 互链开关与单轮上限 |
+| `tune.enabled` / `tune.maxDelta` | `false` / `0.2` | 阈值自调开关与单步上限 |
+| `scope` | `'workspace'` | `'user'` 时全局库也参与（默认只当前工作区） |
 | `forget.halfLifeDays` | `90` | salience 半衰期 |
 | `forget.minAccessAgeDays` | `90` | 归档最小年龄 |
 | `forget.minSalience` | `0.2` | 归档 salience 上限 |
@@ -351,8 +361,9 @@ v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-me
 
 ### 成本
 
-- 默认**零 LLM 调用**：一轮只有分词/打分/Jaccard 相似度，84 篇量级库 < 1 秒；周报几百字节；git 一个 commit。
-- 模型侧唯一成本是手动 `devmemory_admin(op="evolve")` 时返回的报告（几百 token）。
+- 本地阶段零模型调用：分词/打分/Jaccard/回放，84 篇量级库 < 1 秒；周报几 KB；git 一个 commit。
+- LLM 阶段（默认开）：一轮通常 **1–3 次**调用（提炼 1 次 + 灰区判重 ≤5 次），每次 `maxTokens` 默认 800、超时 60s；失败自动回退启发式，不阻断演化。完全不想用模型就设 `reflect: 'heuristic'`（0 次调用）。
+- 手动 `devmemory_admin(op="evolve")` 时报告会进上下文（几百 token，摘要包含指标与明细）。
 
 ## 诊断与异常记录（v0.4）
 

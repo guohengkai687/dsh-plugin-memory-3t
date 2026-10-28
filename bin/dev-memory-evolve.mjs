@@ -14,7 +14,7 @@ const { DEFAULT_CONFIG, mergeConfig } = await import('../dist/config.js')
 const { MemoryStore } = await import('../dist/store.js')
 const { runEvolution } = await import('../dist/evolve.js')
 
-const STAGES = ['harvest', 'reflect', 'consolidate', 'forget', 'report']
+const STAGES = ['harvest', 'reflect', 'consolidate', 'forget', 'evaluate', 'tune', 'report']
 
 function parseArgs(argv) {
   const out = { root: undefined, dryRun: false, windowDays: undefined, stages: undefined, json: false }
