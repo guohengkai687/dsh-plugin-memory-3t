@@ -1,4 +1,4 @@
-﻿/**
+/**
  * v0.7 MCP stdio 服务器集成测试。
  *
  * 全部用例都**真实 spawn** `node bin/dev-memory-mcp.mjs --root <临时目录>`，
@@ -407,7 +407,7 @@ test('mcp(v0.7.0): --tools core 暴露 6 个工具（5 高频 + admin）', async
     assert.deepEqual(names, ['devmemory_admin', 'devmemory_consolidate', 'devmemory_note', 'devmemory_recall', 'devmemory_remember', 'devmemory_status'])
     // admin 的 op 覆盖全部低频动作（含 diag/restore 等危险操作）
     const admin = result.tools.find((tool) => tool.name === 'devmemory_admin')
-    assert.deepEqual([...admin.inputSchema.properties.op.enum].sort(), ['diag', 'diff', 'forget', 'history', 'link', 'restore', 'seed'])
+    assert.deepEqual([...admin.inputSchema.properties.op.enum].sort(), ['diag', 'diff', 'evolve', 'forget', 'history', 'link', 'restore', 'seed'])
     assert.equal(admin.inputSchema.type, 'object')
   } finally {
     await core.close()

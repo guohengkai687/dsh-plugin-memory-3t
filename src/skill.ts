@@ -19,9 +19,9 @@ export function loadMemorySkillContent(): string {
 export const MEMORY_SKILL_NAME = 'dev-memory'
 
 export const MEMORY_SKILL_DESCRIPTION =
-  '三层长期记忆协议：按层读写记忆（L1 会话流水 / L2 知识笔记 / L3 长期事实，库根 <工作区>/.memory/），执行 recall / remember / note / consolidate，低频运维走 devmemory_admin（link / forget / history / diff / restore / diag / seed）；记忆库由 git 管理版本，可回溯；WebUI 面板与参数可在 DSH 设置「记忆管理」页管理（v0.5、v0.7）。'
+  '三层长期记忆协议：按层读写记忆（L1 会话流水 / L2 知识笔记 / L3 长期事实，库根 <工作区>/.memory/），执行 recall / remember / note / consolidate，低频运维走 devmemory_admin（link / forget / history / diff / restore / diag / seed / evolve）；周演化每周自动跑一轮（无 LLM、dry-run 可预览、归档可恢复）；记忆库由 git 管理版本，可回溯；WebUI 面板与参数可在 DSH 设置「记忆管理」页管理（v0.5、v0.7）。'
 
 export const MEMORY_SKILL_WHEN_TO_USE =
-  '用户提到旧事/偏好/决策、说"记住/忘掉/整理一下记忆"、需要检索项目历史或会话历史、会话收尾沉淀时。'
+  '用户提到旧事/偏好/决策、说"记住/忘掉/整理一下记忆"、需要检索项目历史或会话历史、问"最近学到什么/上周做了什么"、会话收尾沉淀时。'
 
 export const MEMORY_SKILL_INVOCATION = { modelInvocable: true, userInvocable: false } as const

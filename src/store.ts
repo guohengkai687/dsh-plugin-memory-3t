@@ -34,6 +34,9 @@ import { GitVcs, type VcsStatus } from './vcs.js'
 export type EntryKind = 'preference' | 'decision' | 'entity' | 'context'
 export type Importance = 'low' | 'medium' | 'high'
 
+/** v0.9.0：条目的生命周期状态（缺省视为 active，历史文件无需迁移）。 */
+export type EntryStatus = 'active' | 'superseded' | 'archived'
+
 export interface SpaceEntry {
   id: string
   kind: EntryKind
@@ -45,6 +48,15 @@ export interface SpaceEntry {
   links: string[]
   summary: string
   body: string
+  /** v0.9.0：active（默认）/ superseded（被新结论取代）/ archived（已归档）。 */
+  status?: EntryStatus
+  /** v0.9.0：本条目取代了哪些旧条目。 */
+  supersedes?: string[]
+  /** v0.9.0：由哪些条目合并而来（周演化用）。 */
+  mergedFrom?: string[]
+  /** v0.9.0：归档时间与原因。 */
+  archivedAt?: string
+  archiveReason?: string
 }
 
 export interface RecallOptions {
@@ -90,6 +102,40 @@ export interface MetaFile {
   lastOpen: { at: string; root: string; platform: string; node: string }
   digest: DigestState
   counters: Record<string, number>
+  /** v0.9.0：周演化状态（缺省视为从未运行，向后兼容）。 */
+  evolve?: EvolveState
+}
+
+/** v0.9.0：周演化运行状态（持久化在 meta.json，跨进程可见）。 */
+export interface EvolveState {
+  /** 最近一次成功/失败运行的时间（ISO）；从未运行过为 null。 */
+  lastRunAt: string | null
+  lastOutcome: 'ok' | 'partial' | 'error' | null
+  lastError: string | null
+  /** 运行租约：非 null 且未过期说明有进程正在跑（防并发）。 */
+  running: string | null
+  /** 累计运行次数。 */
+  runs: number
+}
+
+export const EMPTY_EVOLVE_STATE: EvolveState = {
+  lastRunAt: null,
+  lastOutcome: null,
+  lastError: null,
+  running: null,
+  runs: 0,
+}
+
+function normalizeEvolveState(value: unknown): EvolveState {
+  const raw = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
+  const outcome = raw.lastOutcome === 'ok' || raw.lastOutcome === 'partial' || raw.lastOutcome === 'error' ? raw.lastOutcome : null
+  return {
+    lastRunAt: typeof raw.lastRunAt === 'string' ? raw.lastRunAt : null,
+    lastOutcome: outcome,
+    lastError: typeof raw.lastError === 'string' ? raw.lastError : null,
+    running: typeof raw.running === 'string' ? raw.running : null,
+    runs: typeof raw.runs === 'number' && Number.isFinite(raw.runs) ? Math.max(0, Math.floor(raw.runs)) : 0,
+  }
 }
 
 /** v1 文件（已退役）：只用于迁移 createdAt / digest / counters，其余字段一律丢弃。 */
@@ -373,6 +419,7 @@ export class MemoryStore {
       lastOpen: { at: now, root: this.root, platform: process.platform, node: process.versions.node },
       digest: normalizeDigestState(previous?.digest),
       counters: normalizeCounters(previous?.counters),
+      evolve: normalizeEvolveState((previous as unknown as Partial<MetaFile> | null)?.evolve),
     }
     this.meta = meta
     // v1（或首次/损坏）→ 立刻以 v2 落盘，把旧的绝对库根与配置副本覆盖掉；
@@ -531,6 +578,11 @@ export class MemoryStore {
 
   private async writeEntry(entry: SpaceEntry): Promise<void> {
     await mkdir(this.dirs.spaces, { recursive: true, mode: 0o700 })
+    await this.writeEntryAt(safeJoin(this.dirs.spaces, `${entry.id}.md`), entry)
+  }
+
+  /** 把条目序列化写到指定路径（归档区复用同一格式）。 */
+  private async writeEntryAt(path: string, entry: SpaceEntry): Promise<void> {
     const data: Record<string, unknown> = {
       id: entry.id,
       kind: entry.kind,
@@ -541,8 +593,14 @@ export class MemoryStore {
       tags: entry.tags,
       links: entry.links,
     }
+    // v0.9.0：生命周期字段只在存在时落盘，历史条目的 frontmatter 保持原样。
+    if (entry.status !== undefined && entry.status !== 'active') data.status = entry.status
+    if (entry.supersedes !== undefined && entry.supersedes.length > 0) data.supersedes = entry.supersedes
+    if (entry.mergedFrom !== undefined && entry.mergedFrom.length > 0) data.mergedFrom = entry.mergedFrom
+    if (entry.archivedAt !== undefined) data.archivedAt = entry.archivedAt
+    if (entry.archiveReason !== undefined) data.archiveReason = entry.archiveReason
     const text = serializeFrontmatter(data, entry.body)
-    await writeFile(safeJoin(this.dirs.spaces, `${entry.id}.md`), text, { mode: 0o600 })
+    await writeFile(path, text, { mode: 0o600 })
   }
 
   async readEntry(id: string): Promise<SpaceEntry | null> {
@@ -559,6 +617,7 @@ export class MemoryStore {
 
   private entryFromData(id: string, data: Record<string, unknown>, body: string): SpaceEntry {
     const kind = KIND_BY_SHORT[id.slice(0, id.indexOf('-'))] ?? 'context'
+    const status = data.status === 'superseded' || data.status === 'archived' ? data.status : 'active'
     return {
       id,
       kind,
@@ -570,6 +629,11 @@ export class MemoryStore {
       links: Array.isArray(data.links) ? (data.links as string[]) : [],
       summary: entrySummary(body),
       body,
+      status,
+      ...(Array.isArray(data.supersedes) ? { supersedes: data.supersedes as string[] } : {}),
+      ...(Array.isArray(data.mergedFrom) ? { mergedFrom: data.mergedFrom as string[] } : {}),
+      ...(typeof data.archivedAt === 'string' ? { archivedAt: data.archivedAt } : {}),
+      ...(typeof data.archiveReason === 'string' ? { archiveReason: data.archiveReason } : {}),
     }
   }
 
@@ -673,6 +737,130 @@ export class MemoryStore {
       if (entry !== null) out.push(entry)
     }
     return out
+  }
+
+  // ------------------------------------------------------- evolve / archive (v0.9.0)
+
+  /** 周演化状态（来自 meta.json，缺省为空态）。 */
+  get evolveState(): EvolveState {
+    return this.meta?.evolve ?? EMPTY_EVOLVE_STATE
+  }
+
+  /** 合并更新周演化状态并落盘。 */
+  async updateEvolveState(patch: Partial<EvolveState>): Promise<EvolveState> {
+    if (this.meta === null) await this.loadMeta()
+    if (this.meta === null) return EMPTY_EVOLVE_STATE
+    this.meta.evolve = { ...normalizeEvolveState(this.meta.evolve), ...patch }
+    await this.writeMeta()
+    return this.meta.evolve
+  }
+
+  /**
+   * 归档一条 L3：`spaces/<id>.md` → `spaces/archive/YYYY-MM/<id>.md`。
+   * 归档 = 移动 + 标记，**永不删除**（git 历史完整，restoreEntry 可恢复）。
+   */
+  async archiveEntry(id: string, reason: string, now: Date = new Date()): Promise<boolean> {
+    this.assertWritable()
+    if (!/^[a-z0-9]+-/.test(id)) return false
+    const entry = await this.readEntry(id)
+    if (entry === null) return false
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const dir = safeJoin(this.dirs.spaces, 'archive', month)
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 })
+      const archived: SpaceEntry = { ...entry, status: 'archived', archivedAt: now.toISOString(), archiveReason: reason }
+      await this.writeEntryAt(safeJoin(dir, `${id}.md`), archived)
+      await rm(safeJoin(this.dirs.spaces, `${id}.md`))
+    } catch {
+      return false
+    }
+    this.index.markDirty()
+    this.vcsRecord('l3', `archive ${id}`)
+    await this.audit('archive', { targetId: id, reason })
+    return true
+  }
+
+  /** 从归档区恢复一条条目（原路移回 spaces/）。 */
+  async restoreEntry(id: string): Promise<boolean> {
+    this.assertWritable()
+    if (!/^[a-z0-9]+-/.test(id)) return false
+    const dirs = await this.archiveMonths()
+    for (const month of dirs) {
+      const path = safeJoin(this.dirs.spaces, 'archive', month, `${id}.md`)
+      try {
+        const raw = await readFile(path, 'utf8')
+        const { data, body } = parseFrontmatter(raw)
+        const entry = this.entryFromData(id, { ...data, status: 'active' }, body)
+        const restored: SpaceEntry = { ...entry, status: 'active', archivedAt: undefined, archiveReason: undefined }
+        delete restored.archivedAt
+        delete restored.archiveReason
+        await this.writeEntry(restored)
+        await rm(path)
+        this.index.markDirty()
+        this.vcsRecord('l3', `restore ${id}`)
+        await this.audit('restore', { targetId: id, from: `archive/${month}` })
+        return true
+      } catch {
+        /* 继续找下一个月 */
+      }
+    }
+    return false
+  }
+
+  /** 列出归档区条目 id（`archive/<YYYY-MM>/<id>.md`）。 */
+  async listArchived(): Promise<string[]> {
+    const out: string[] = []
+    for (const month of await this.archiveMonths()) {
+      try {
+        const names = await readdir(safeJoin(this.dirs.spaces, 'archive', month))
+        for (const name of names) {
+          if (name.endsWith('.md')) out.push(`${month}/${name.slice(0, -3)}`)
+        }
+      } catch {
+        /* 跳过损坏的月份目录 */
+      }
+    }
+    return out
+  }
+
+  private async archiveMonths(): Promise<string[]> {
+    try {
+      const names = await readdir(safeJoin(this.dirs.spaces, 'archive'))
+      return names.filter((n) => /^\d{4}-\d{2}$/.test(n)).sort()
+    } catch {
+      return []
+    }
+  }
+
+  // ---------------------------------------------------------------- L1 / L2 读取
+
+  /** 列出 L1 流水文件的日期键（`YYYY-MM-DD`，升序）。 */
+  async listRuntimeDates(): Promise<string[]> {
+    try {
+      const names = await readdir(this.dirs.runtime)
+      return names
+        .filter((n) => /^\d{4}-\d{2}-\d{2}\.md$/.test(n))
+        .map((n) => n.slice(0, -3))
+        .sort()
+    } catch {
+      return []
+    }
+  }
+
+  /** 列出 L2 笔记相对路径（posix 分隔符，升序）。 */
+  async listNotes(): Promise<string[]> {
+    const out: string[] = []
+    await this.listMarkdownFiles(this.dirs.docs, '', out)
+    return out.sort()
+  }
+
+  /** 读 L2 笔记原文（含 frontmatter）；路径非法或不存在返回 null。 */
+  async readNote(relPath: string): Promise<string | null> {
+    try {
+      return await readFile(safeJoin(this.dirs.docs, relPath.replace(/\\/g, '/')), 'utf8')
+    } catch {
+      return null
+    }
   }
 
   // ---------------------------------------------------------------- L1 runtime

@@ -89,6 +89,26 @@ export interface SeedConfig {
   maxEntries: number
 }
 
+/** v0.9.0：周演化阶段（顺序即执行顺序）。 */
+export type EvolveStageName = 'harvest' | 'reflect' | 'consolidate' | 'forget' | 'report'
+
+/** v0.9.0：周演化配置（设计见 docs/design/DESIGN-evolve-v0.9.md）。 */
+export interface EvolveConfig {
+  enabled: boolean
+  /** 距上次运行的间隔（天）：到期后下次会话启动时后台跑。 */
+  intervalDays: number
+  /** 采集窗口（天）。 */
+  windowDays: number
+  /** 只出报告不写库（建议首周 true）。 */
+  dryRun: boolean
+  stages: EvolveStageName[]
+  harvest: { maxCandidates: number; minScore: number; minEvidence: number }
+  /** 巩固时判定「重复」的相似度阈值（默认与 dedupe.threshold 一致）。 */
+  dedupeThreshold: number
+  reflect: 'heuristic' | 'llm'
+  forget: { halfLifeDays: number; minAccessAgeDays: number; minSalience: number; maxPrune: number }
+}
+
 export interface VcsConfig {
   /** 版本回溯开关；false 时完全跳过 git（等同 v0.1 行为）。 */
   enabled: boolean
@@ -188,6 +208,8 @@ export interface Config {
   webui: WebUiConfig
   /** 冷启动 seed（v0.6.5）：无 LLM 地从仓库确定性信号生成项目骨架 L2。 */
   seed: SeedConfig
+  /** 周演化（v0.9.0）：采集→提炼→巩固→遗忘→周报，每 intervalDays 天一次。 */
+  evolve: EvolveConfig
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -224,6 +246,18 @@ export const DEFAULT_CONFIG: Config = {
   // v0.6.5：auto 默认 false——写库是显式动作（由 skill 引导模型在空库时调用 devmemory_seed）；
   // 想复刻 Hindsight 的零配置开箱行为，把它设为 true。
   seed: { enabled: true, auto: false, gitCommits: 30, maxEntries: 40 },
+  // v0.9.0：周演化默认开启但先跑 dryRun？—— 默认 apply（false）；首周建议手动改 true 观察。
+  evolve: {
+    enabled: true,
+    intervalDays: 7,
+    windowDays: 7,
+    dryRun: false,
+    stages: ['harvest', 'reflect', 'consolidate', 'forget', 'report'],
+    harvest: { maxCandidates: 20, minScore: 0.45, minEvidence: 2 },
+    dedupeThreshold: 0.55,
+    reflect: 'heuristic',
+    forget: { halfLifeDays: 90, minAccessAgeDays: 90, minSalience: 0.2, maxPrune: 50 },
+  },
 }
 
 // ------------------------------------------------------------ 宿主表单 schema（DSH 0.1.7+）
@@ -339,6 +373,45 @@ export const Config = z.object({
     })
     .default({ enabled: true, auto: false, gitCommits: 30, maxEntries: 40 })
     .volatile(),
+
+  evolve: z
+    .object({
+      enabled: z.boolean().default(true),
+      intervalDays: z.number().min(1).default(7),
+      windowDays: z.number().min(1).default(7),
+      dryRun: z.boolean().default(false),
+      stages: z
+        .array(z.union(['harvest', 'reflect', 'consolidate', 'forget', 'report']))
+        .default(['harvest', 'reflect', 'consolidate', 'forget', 'report']),
+      harvest: z
+        .object({
+          maxCandidates: z.number().min(1).default(20),
+          minScore: z.number().min(0).max(1).default(0.45),
+          minEvidence: z.number().min(1).default(2),
+        })
+        .default({ maxCandidates: 20, minScore: 0.45, minEvidence: 2 }),
+      dedupeThreshold: z.number().min(0).max(1).default(0.55),
+      reflect: z.union(['heuristic', 'llm']).default('heuristic'),
+      forget: z
+        .object({
+          halfLifeDays: z.number().min(1).default(90),
+          minAccessAgeDays: z.number().min(1).default(90),
+          minSalience: z.number().min(0).max(1).default(0.2),
+          maxPrune: z.number().min(0).default(50),
+        })
+        .default({ halfLifeDays: 90, minAccessAgeDays: 90, minSalience: 0.2, maxPrune: 50 }),
+    })
+    .default({
+      enabled: true,
+      intervalDays: 7,
+      windowDays: 7,
+      dryRun: false,
+      stages: ['harvest', 'reflect', 'consolidate', 'forget', 'report'],
+      harvest: { maxCandidates: 20, minScore: 0.45, minEvidence: 2 },
+      dedupeThreshold: 0.55,
+      reflect: 'heuristic',
+      forget: { halfLifeDays: 90, minAccessAgeDays: 90, minSalience: 0.2, maxPrune: 50 },
+    }),
 })
 
 /**
@@ -382,6 +455,9 @@ export function mergeConfig(partial: unknown): Config {
   const diag = (p.diag ?? {}) as Record<string, unknown>
   const webui = (p.webui ?? {}) as Record<string, unknown>
   const seed = (p.seed ?? {}) as Record<string, unknown>
+  const evolve = (p.evolve ?? {}) as Record<string, unknown>
+  const evolveHarvest = (evolve.harvest ?? {}) as Record<string, unknown>
+  const evolveForget = (evolve.forget ?? {}) as Record<string, unknown>
   const defaultIdentity = DEFAULT_CONFIG.vcs.identity
   const branch = typeof vcs.branch === 'string' && /^[a-zA-Z0-9._/-]+$/.test(vcs.branch.trim()) ? vcs.branch.trim() : DEFAULT_CONFIG.vcs.branch
   const vcsOut: VcsConfig = {
@@ -446,6 +522,39 @@ export function mergeConfig(partial: unknown): Config {
       auto: seed.auto === true,
       gitCommits: Math.floor(clampNonNegative(seed.gitCommits, DEFAULT_CONFIG.seed.gitCommits)),
       maxEntries: Math.max(1, Math.floor(clampNonNegative(seed.maxEntries, DEFAULT_CONFIG.seed.maxEntries))),
+    },
+    // v0.9.0：周演化（阶段按白名单过滤，未知值忽略；阈值钳到 [0,1]）
+    evolve: {
+      enabled: evolve.enabled !== false,
+      intervalDays: Math.max(1, clampNonNegative(evolve.intervalDays, DEFAULT_CONFIG.evolve.intervalDays)),
+      windowDays: Math.max(1, clampNonNegative(evolve.windowDays, DEFAULT_CONFIG.evolve.windowDays)),
+      dryRun: evolve.dryRun === true,
+      stages:
+        Array.isArray(evolve.stages) && evolve.stages.length > 0
+          ? (evolve.stages.filter(
+              (s): s is EvolveStageName =>
+                s === 'harvest' || s === 'reflect' || s === 'consolidate' || s === 'forget' || s === 'report',
+            ) as EvolveStageName[])
+          : [...DEFAULT_CONFIG.evolve.stages],
+      harvest: {
+        maxCandidates: Math.max(1, Math.floor(clampNonNegative(evolveHarvest.maxCandidates, DEFAULT_CONFIG.evolve.harvest.maxCandidates))),
+        minScore: Math.min(1, clampNonNegative(evolveHarvest.minScore, DEFAULT_CONFIG.evolve.harvest.minScore)),
+        minEvidence: Math.max(1, Math.floor(clampNonNegative(evolveHarvest.minEvidence, DEFAULT_CONFIG.evolve.harvest.minEvidence))),
+      },
+      dedupeThreshold: Math.min(
+        1,
+        clampNonNegative(evolve.dedupeThreshold, clampNonNegative(dedupe.threshold, DEFAULT_CONFIG.evolve.dedupeThreshold)),
+      ),
+      reflect: evolve.reflect === 'llm' ? 'llm' : 'heuristic',
+      forget: {
+        halfLifeDays: Math.max(1, clampNonNegative(evolveForget.halfLifeDays, DEFAULT_CONFIG.evolve.forget.halfLifeDays)),
+        minAccessAgeDays: Math.max(
+          1,
+          clampNonNegative(evolveForget.minAccessAgeDays, DEFAULT_CONFIG.evolve.forget.minAccessAgeDays),
+        ),
+        minSalience: Math.min(1, clampNonNegative(evolveForget.minSalience, DEFAULT_CONFIG.evolve.forget.minSalience)),
+        maxPrune: Math.floor(clampNonNegative(evolveForget.maxPrune, DEFAULT_CONFIG.evolve.forget.maxPrune)),
+      },
     },
   }
 }

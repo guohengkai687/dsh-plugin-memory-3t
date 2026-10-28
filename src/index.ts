@@ -37,6 +37,7 @@ import { resolve } from 'node:path'
 
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
+import { evolutionDue, runEvolution } from './evolve.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
 import { approximateTokens, clampLines, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget } from './render.js'
 import { seedLibrary } from './seed.js'
@@ -463,6 +464,21 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
         } catch (error) {
           warn(`[dev-memory] 会话启动补交失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
         }
+      }
+      // 5) v0.9.0：周演化懒触发——距上次运行 ≥ intervalDays 时后台跑一次，不阻塞首步。
+      //    用本会话已解析的 store（B1 教训：禁止全局 active），失败只记诊断、不影响会话。
+      if (config.evolve.enabled && evolutionDue(store.evolveState, config.evolve)) {
+        void runEvolution(store, config.evolve)
+          .then((report) => {
+            if (report !== null) {
+              ctx.logger.info?.(
+                `[dev-memory] 周演化完成：新增 ${report.consolidate.created.length} / 合并 ${report.consolidate.merged.length} / 归档 ${report.forget.archived.length}（${report.durationMs}ms）`,
+              )
+            }
+          })
+          .catch((error: unknown) => {
+            warn(`[dev-memory] 周演化失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
+          })
       }
       // 5) webServer 可能晚于插件 apply 才就绪 → 首次会话补一次面板挂载
       ensurePanel()

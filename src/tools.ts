@@ -18,6 +18,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 import type { DigestEngine } from './digest.js'
+import { runEvolution } from './evolve.js'
+import type { EvolveStageName } from './config.js'
 import { seedLibrary } from './seed.js'
 import type { EntryKind, Importance, MemoryStore } from './store.js'
 
@@ -522,12 +524,38 @@ export function createTools(
         return seedLibrary(s, s.config, { force: bool(args, 'force') === true })
       },
     },
+    {
+      tool: 'devmemory_evolve',
+      op: 'evolve',
+      description: '周演化：采集流水→提炼 L3→合并→衰减归档→周报；dryRun 只出报告。',
+      properties: {
+        dryRun: { type: 'boolean', description: '只出报告不写库。' },
+        windowDays: { type: 'number', description: '窗口天数（默认 7）。' },
+        stages: { type: 'array', items: { type: 'string' }, description: '阶段子集（默认全部）。' },
+      },
+      required: [],
+      async execute(args) {
+        const s = store()
+        const allowed: EvolveStageName[] = ['harvest', 'reflect', 'consolidate', 'forget', 'report']
+        const requested = strArray(args, 'stages')
+        const stages =
+          requested === undefined
+            ? undefined
+            : (requested.filter((s): s is EvolveStageName => (allowed as string[]).includes(s)))
+        const report = await runEvolution(s, s.config.evolve, {
+          dryRun: bool(args, 'dryRun') === true,
+          windowDays: num(args, 'windowDays'),
+          ...(stages !== undefined && stages.length > 0 ? { stages } : {}),
+        })
+        return report ?? { skipped: 'disabled-or-already-running' }
+      },
+    },
   ]
 
   const adminTool: ToolDefinition = {
     name: 'devmemory_admin',
     description:
-      '低频运维（一次一件）：op=link 关联 L3 / forget 删除降权 / history git 历史 / diff 变更明细 / restore 恢复提交 / diag 诊断记录 / seed 冷启动骨架。',
+      '低频运维：op=link/forget/history/diff/restore/diag/seed/evolve（周演化，dryRun 试跑）。',
     parameters: {
       type: 'object',
       properties: {
@@ -574,7 +602,7 @@ export const CORE_TOOL_NAMES = [
   'devmemory_admin',
 ] as const
 
-/** full 面工具名（v0.6 的 12 个独立工具）。 */
+/** full 面工具名（v0.6 的 12 个独立工具 + v0.9.0 的 evolve）。 */
 export const FULL_TOOL_NAMES = [
   'devmemory_status',
   'devmemory_recall',
@@ -588,4 +616,5 @@ export const FULL_TOOL_NAMES = [
   'devmemory_restore',
   'devmemory_diag',
   'devmemory_seed',
+  'devmemory_evolve',
 ] as const

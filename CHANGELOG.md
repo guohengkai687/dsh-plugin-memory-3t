@@ -3,6 +3,40 @@
 本文件记录 dsh-plugin-memory-3t 的版本变更。版本号与 `package.json` / `src/shared.ts`
 的 `PLUGIN_VERSION` 一致（`test/version.test.mjs` 断言），发版打 `v<version>` tag。
 
+## v0.9.0 — 2026-10-28
+
+**主题：周演化（自学习闭环 P0）**——让库每周自己"复盘"一次：把 L1 流水里反复出现、被显式强调的内容提炼成 L3，合并重复条目，衰减并归档死记录，产出一份周报。设计文档：`docs/design/DESIGN-evolve-v0.9.md`；运维指南：`docs/evolve.md`。
+
+### 新增
+
+- **五个阶段**（`src/evolve.ts`）：`harvest`（L1 流水 → 候选，频次/显式/新近/新颖/复现五维打分，≥2 个独立来源且 ≥0.45 才进入）→ `reflect`（启发式落 L3，`reflect: 'llm'` 为 P1 预留）→ `consolidate`（Jaccard ≥ 0.55 合并，`mergedFrom` 记来源；否则新建）→ `forget`（`s' = clamp01(s·0.5^(Δt/90) + min(0.3, 0.05·窗口访问数))`，零访问 + 超 90 天 + salience < 0.2 归档到 `spaces/archive/YYYY-MM/`，单轮上限 50）→ `report`（周报 `docs/notes/YYYY-MM-DD-weekly-review.md`）。
+- **纯函数层**（`src/lifecycle.ts`）：`decaySalience` / `shouldArchive` / `similarity` / `mergeInto` / `tokenSet`，无 IO、可单测。
+- **懒触发**（`src/index.ts`）：会话启动时若 `now - lastRunAt ≥ intervalDays(7)` 且未被 10 分钟租约占用，则后台跑一轮（不阻塞会话）；日志 `[dev-memory] 周演化完成：新增 x / 合并 y / 归档 z`。
+- **手动入口**：`devmemory_admin(op="evolve")`（`dryRun` / `windowDays` / `stages`），full 面新增 `devmemory_evolve`（full 面 12 → 13 个工具）。
+- **CLI**（`bin/dev-memory-evolve.mjs` + `package.json#bin`）：`dev-memory-evolve --root <dir> [--dry-run] [--window N] [--stages a,b] [--json]`，退出码 0/1/2，可 cron 兜底。
+- **数据模型**：L3 新增可选 `status`（active/superseded/archived）、`supersedes`、`mergedFrom`、`archivedAt`、`archiveReason`；`meta.json` 新增 `evolve {lastRunAt,lastOutcome,lastError,running,runs}`。
+- **归档/恢复**：`archiveEntry` / `restoreEntry` / `listArchived` / `archiveMonths`（`devmemory_admin(op="restore")` 可恢复）。
+- **配置**：`config.evolve`（enabled/intervalDays/windowDays/dryRun/stages/harvest/dedupeThreshold/reflect/forget.*），设置页可改，全部带默认值。
+
+### 安全与回滚
+
+- `dryRun: true` 时零写盘，只产报告；老库建议先滚两周。
+- 每轮演化 = 一个 `[evolve] weekly YYYY-MM-DD` git commit，`git revert` 即可整体回滚。
+- 归档是**移动**不是删除；`restore` 或 `git checkout` 可完整取回。
+- 演化按 `exec.agent.session.header.cwd` 解析库（沿用 v0.8.0 B1 的隔离约束）。
+
+### 测试
+
+- 新增 `test/evolve.test.mjs`（8 个用例：衰减/归档判定/Jaccard 合并/due+租约+标签+周报渲染/dry-run 与正式写入/归档与恢复/间隔与租约/CLI smoke）。
+- 调整 `test/tools.test.mjs`（full 面 13 个工具、admin op enum 含 `evolve`、core 面 schema 仍 < 1000 tokens）、`test/mcp.test.mjs`（op enum）、`test/version.test.mjs`（0.9.0）。
+- 全量不回归：205 → **213 tests**（新增 8 个演化用例），MCP 用例需放开 spawn 权限。
+
+### 已知边界（P1/P2 计划）
+
+- 无 LLM 时 `reflect` 只能做"提炼 + 归类"，不产洞见；`tune`（自调参）默认关。
+- 周报里的 `hit@5 / waste@5` 标 `P2`（需要回放评估）。
+- 老库首次演化会一次性归档多批条目（受 `maxPrune` 限制），建议先 dry-run 观察。
+
 ## v0.8.0 — 2026-10-21
 
 审计（2026-10-21，对 `D:\DeepSeek\Harness\.memory` 与 `D:\GitLabCode\FlexOne014_master\.memory`

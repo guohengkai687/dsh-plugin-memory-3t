@@ -69,6 +69,17 @@ v0.7.0 起：L1 回放每行是**摘要**（长 prompt 截断加 `…`），超�
 
 若插件提示"digest 未完成"，在下一次合适时机补做，最多补一次。
 
+## 周演化（v0.9.0，自动，不用你主动跑）
+
+插件会在会话启动时检查是否到点（默认 7 天），到点就在后台跑一轮"周演化"：把 L1 流水提炼成 L3、合并重复条目、衰减并归档死记录、写周报 `docs/notes/<日期>-weekly-review.md`。**它自己跑，不需要你在会话里触发。**
+
+你只需要知道：
+
+- 用户想手动来一轮：先 `devmemory_admin(op="evolve", dryRun=true)` 看计划，确认后去掉 `dryRun` 再执行；或命令行 `node bin/dev-memory-evolve.mjs --root <工作区> --dry-run`。
+- 用户问"最近/上周我都在干什么、学到什么"：先 `devmemory_recall` 查 `weekly-review` 周报，再按需取 L2 细节。
+- 演化**不删数据**：被归档的条目在 `spaces/archive/YYYY-MM/`，`devmemory_admin(op="restore", id="<id>")` 可恢复。
+- 不要在会话中途手动跑演化（会和本轮的记忆写入抢同一批文件）；要么放在收尾后，要么让它按周期自己跑。
+
 ## 禁止
 
 - **禁止**把整篇 L2 笔记复制进对话或注入 prompt——需要内容时用 `devmemory_recall` 取片段。

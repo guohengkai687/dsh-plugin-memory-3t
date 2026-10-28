@@ -59,9 +59,9 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 | `devmemory_remember` | 写 L3 条目（kind: preference/decision/entity/context） |
 | `devmemory_note` | 写/追加 L2 笔记（防路径逃逸） |
 | `devmemory_consolidate` | 立即触发 digest 沉淀 + 提交 git 版本 |
-| `devmemory_admin` | 低频运维（一次一件）：`op=link` L3 互链 / `forget` 删除或降权 / `history` git 历史 / `diff` 变更明细 / `restore` 恢复提交 / `diag` 诊断记录 / `seed` 冷启动骨架 |
+| `devmemory_admin` | 低频运维（一次一件）：`op=link` L3 互链 / `forget` 删除或降权 / `history` git 历史 / `diff` 变更明细 / `restore` 恢复提交 / `diag` 诊断记录 / `seed` 冷启动骨架 / `evolve` 周演化（v0.9.0，可 `dryRun`） |
 
-`full` 面 = 上面 5 个高频工具 + 下面 7 个独立工具（与 v0.6 完全一致，迁移无感）：
+`full` 面 = 上面 5 个高频工具 + 下面 8 个独立工具（v0.6 的 7 个 + v0.9.0 的 `devmemory_evolve`，迁移无感）：
 
 | full 面独立工具 | 等价 admin 调用 |
 |---|---|
@@ -72,6 +72,7 @@ dsh plugin --profile <profile> add dsh-plugin-memory-3t
 | `devmemory_restore` | `devmemory_admin(op="restore", ref, targets, dryRun)` |
 | `devmemory_diag` | `devmemory_admin(op="diag", action, level, tool, origin, days, limit)` |
 | `devmemory_seed` | `devmemory_admin(op="seed", force)` |
+| `devmemory_evolve` | `devmemory_admin(op="evolve", dryRun, windowDays, stages)` |
 
 > **为什么合并**（2026-09-23 实测）：DSH 每次模型调用都会带上全部工具的 schema（实测 39 个工具 = 9203 tokens），其中 12 个 `devmemory_*` 占 **2081 tokens/调用 ≈ 插件全部 token 开销的 99%**；而这 7 个低频工具在 3 天窗口的 1188 次调用里只被用到 12 次。合并后 core 面实测 **943 tokens/调用（-55%）**。完整测量链路见 `.memory/docs/notes/2026-09-23-memory-3t-token-cost-evaluation.md`。
 
@@ -299,6 +300,59 @@ v0.6.6 之后做了一次**真实计费口径的实测**（成本台账 `cost-me
 | **F6** | `meta.json` 计数落后真实库（35/24 vs 55/13）；`dist` 与源码新鲜度无校验；历史 tag 缺失 | 启动 `reconcileCounters()` 按磁盘实扫**只向上修正**；新增 `npm run verify:dist`；补 `v0.6.1`/`v0.6.4` tag（v0.7.1–0.7.3 无独立提交，不补假 tag）；版本统一 0.8.0 |
 
 > 升级提示：v0.8.0 首次访问各库时会重建 `index.json`（几十篇量级，毫秒级），`index.json` 体积随之下降；`diag/events.jsonl` 里的历史噪声不需要手工清理。
+
+## 周演化（v0.9.0，P0）
+
+库会随会话自动增长（L1 流水每天追加），但**"记下来"不等于"学进去"**：v0.8.0 审计的两个真实库里，55 条 L3 有 20 条从未被检索过，L2 只有零星几篇。v0.9.0 引入**每周一次的自演化闭环**（设计见 `docs/design/DESIGN-evolve-v0.9.md`），默认无 LLM、纯启发式，不产生额外模型调用。
+
+### 五个阶段
+
+| 阶段 | 做什么 | 写什么 |
+|---|---|---|
+| harvest | 扫最近 `windowDays`（默认 7）天的 L1 流水，剔除注入噪声/系统提示，按话题聚类打分（频次 0.35 / 显式"记住·决策·教训" 0.25 / 新近度 0.20 / 新颖度 0.10 / 复现度 0.10），只留 ≥`minEvidence` 2 个独立来源且 ≥`minScore` 0.45 的候选 | 无（只产候选） |
+| reflect | 启发式档：候选直接落到 L3（`kind` 按内容判断），标签取高频词前 4 | 无 |
+| consolidate | 与现有 active L3 做 Jaccard 相似度：≥`dedupeThreshold` 0.55 时**合并**（tags 并集、accesses 相加、salience 取高、`mergedFrom` 记来源），否则新建 | L3 新建/合并 |
+| forget | `s' = clamp01(s·0.5^(Δt/90) + min(0.3, 0.05·窗口访问数))`；零访问 + 超 90 天 + salience < 0.2 的条目**归档**到 `spaces/archive/YYYY-MM/`（不删除、可恢复），单轮最多 `maxPrune` 50 条 | L3 归档 + salience 更新 |
+| report | 写周报 `docs/notes/YYYY-MM-DD-weekly-review.md`（指标 + 新增/合并/归档明细 + 成本），并重建索引 | L2 周报 |
+
+整轮结束由插件执行 `flushVcs('[evolve] weekly YYYY-MM-DD')` 生成**一个** git commit；单条变更仍可用 `devmemory_admin(op="history"/"diff")` 追溯。
+
+### 触发
+
+- **懒触发**（默认）：会话启动时检查 `now - meta.evolve.lastRunAt ≥ intervalDays`（默认 7 天），满足则**后台跑**、不阻塞会话；跑前写 10 分钟租约，多会话并发只有一个执行，其余跳过。
+- **手动**：`devmemory_admin(op="evolve")`，可带 `dryRun=true` / `windowDays` / `stages=["harvest","report"]`。
+- **命令行**：`node bin/dev-memory-evolve.mjs --root <工作区> --dry-run`，或装包后 `npx dev-memory-evolve --root . --json`（`--root` 省略时取 `$DEV_MEMORY_ROOT`，再退回当前目录）。
+
+### 配置（`config.evolve`，DSH 设置 →「记忆管理」可改）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 关掉即完全不跑 |
+| `intervalDays` | `7` | 距上次成功运行多少天后触发 |
+| `windowDays` | `7` | 采集窗口 |
+| `dryRun` | `false` | 只出报告不写库（**建议老库首次先滚两周**） |
+| `stages` | 五项全开 | 阶段子集，如 `["harvest","report"]` |
+| `harvest.maxCandidates` | `20` | 单轮候选上限 |
+| `harvest.minScore` | `0.45` | 候选及格线 |
+| `harvest.minEvidence` | `2` | 至少几个独立日期提到 |
+| `dedupeThreshold` | `0.55`（继承 `dedupe.threshold`） | 合并阈值 |
+| `reflect` | `'heuristic'` | P0 只实现启发式；`'llm'` 为 P1 预留 |
+| `forget.halfLifeDays` | `90` | salience 半衰期 |
+| `forget.minAccessAgeDays` | `90` | 归档最小年龄 |
+| `forget.minSalience` | `0.2` | 归档 salience 上限 |
+| `forget.maxPrune` | `50` | 单轮最多归档条数 |
+
+### 回滚与安全
+
+- `dryRun` 下所有写操作都变成计划，报告逐条列出"将新增/合并/归档"的条目。
+- 归档 = 移动文件，不删内容：`devmemory_admin(op="restore", id="<id>")` 恢复到 `spaces/`；也可 `git checkout` 对应 commit 取回。
+- 单轮整体回滚：`git log --grep='^\[evolve\]'` 找到 commit → `git revert <hash>`。
+- 演化只作用于**当前会话工作区的库**（按 `exec.agent.session.header.cwd` 解析，遵循 v0.8.0 B1 的多工作区隔离教训），不会跨工作区串库。
+
+### 成本
+
+- 默认**零 LLM 调用**：一轮只有分词/打分/Jaccard 相似度，84 篇量级库 < 1 秒；周报几百字节；git 一个 commit。
+- 模型侧唯一成本是手动 `devmemory_admin(op="evolve")` 时返回的报告（几百 token）。
 
 ## 诊断与异常记录（v0.4）
 

@@ -29,24 +29,24 @@ test('tools(v0.7.0): core 面 = 5 高频 + 1 个 admin', async () => {
     assert.equal(tools.length, 6)
     assert.deepEqual(tools.map((t) => t.name).sort(), [...CORE_TOOL_NAMES].sort())
     for (const tool of tools) assert.match(tool.name, NAME_RE)
-    // admin 的 op 覆盖全部 7 个低频动作
+    // admin 的 op 覆盖全部 8 个低频动作（v0.9.0 起含 evolve）
     const admin = tools.find((t) => t.name === 'devmemory_admin')
     assert.deepEqual(
       [...admin.parameters.properties.op.enum].sort(),
-      ['diag', 'diff', 'forget', 'history', 'link', 'restore', 'seed'],
+      ['diag', 'diff', 'evolve', 'forget', 'history', 'link', 'restore', 'seed'],
     )
   } finally {
     await rm(ws, { recursive: true, force: true })
   }
 })
 
-test('tools(v0.7.0): full 面仍是 12 个独立工具（兼容 v0.6）', async () => {
+test('tools(v0.9.0): full 面 = 13 个独立工具（v0.6 兼容 + evolve）', async () => {
   const ws = await mkdtemp(join(tmpdir(), 'dm3t-tools-full-'))
   try {
     const store = new MemoryStore(ws, DEFAULT_CONFIG)
     await store.init()
     const tools = createTools(store, new DigestEngine(store), { profile: 'full' })
-    assert.equal(tools.length, 12)
+    assert.equal(tools.length, 13)
     assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort())
   } finally {
     await rm(ws, { recursive: true, force: true })
