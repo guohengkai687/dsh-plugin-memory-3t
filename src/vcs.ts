@@ -18,7 +18,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 
 import { safeJoin } from './paths.js'
 
@@ -105,12 +105,15 @@ interface RunResult {
 export function gitCandidatePaths(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string[] {
   if (platform !== 'win32') return []
   const out: string[] = []
-  const programFiles = env.ProgramFiles
-  const programFilesX86 = env['ProgramFiles(x86)']
-  const localAppData = env.LOCALAPPDATA
-  if (programFiles !== undefined && programFiles !== '') out.push(join(programFiles, 'Git', 'cmd', 'git.exe'))
-  if (programFilesX86 !== undefined && programFilesX86 !== '') out.push(join(programFilesX86, 'Git', 'cmd', 'git.exe'))
-  if (localAppData !== undefined && localAppData !== '') out.push(join(localAppData, 'Programs', 'Git', 'cmd', 'git.exe'))
+  // 用显式的 Windows 分隔符拼装：不能用 path.join（在非 Windows 上会产出 '/'，
+  // 让候选路径在 CI 的 Linux runner 上变成 C:\Program Files/Git/cmd/git.exe）。
+  const under = (base: string | undefined, middle: string): void => {
+    if (base === undefined || base === '') return
+    out.push(`${base.replace(/[\\/]+$/u, '')}\\${middle}\\cmd\\git.exe`)
+  }
+  under(env.ProgramFiles, 'Git')
+  under(env['ProgramFiles(x86)'], 'Git')
+  under(env.LOCALAPPDATA, 'Programs\\Git')
   return out
 }
 

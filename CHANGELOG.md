@@ -3,6 +3,15 @@
 本文件记录 dsh-plugin-memory-3t 的版本变更。版本号与 `package.json` / `src/shared.ts`
 的 `PLUGIN_VERSION` 一致（`test/version.test.mjs` 断言），发版打 `v<version>` tag。
 
+## v0.10.2 — 2026-11-11
+
+**主题：修 v0.10.1 带出来的一处平台相关回归**——v0.10.1 的 CI 在 Linux runner 上失败，原因是兜底候选路径用了 `path.join`，在非 Windows 上分隔符变成 `/`，候选变成 `C:\Program Files/Git/cmd/git.exe`（本机 Windows 测不出来，因为默认分隔符就是 `\`）。
+
+### 修复
+
+- `gitCandidatePaths()` 改为显式拼装 `\\Git\\cmd\\git.exe`（先去掉 base 尾部分隔符），与宿主平台无关，任何平台都产出 Windows 风格路径（`src/vcs.ts`）；同时移除已不再使用的 `join` import。
+- 补充断言：带尾部分隔符的 base 不产生重复分隔符。
+
 ## v0.10.1 — 2026-11-11
 
 **主题：修复 v0.10.0 引入的两个实机故障**——上线 14 天里，周演化一次都没跑成，版本回溯也从某次重启开始静默降级。两处都在诊断里留了痕，趁 12 天复盘一并修掉。

@@ -34,6 +34,9 @@ test('vcs(v0.10.1): Windows PATH 缺 git 时的兜底候选路径', () => {
   assert.deepEqual(gitCandidatePaths(env, 'linux'), [])
   // 环境变量缺失时跳过，而不是产出坏路径
   assert.deepEqual(gitCandidatePaths({}, 'win32'), [])
+  // 路径带尾部分隔符时不产生重复分隔符（v0.10.2：拼装必须与宿主平台无关，
+  // 不能用 path.join，否则 Linux runner 上会得到 C:\Program Files/Git/cmd/git.exe）
+  assert.deepEqual(gitCandidatePaths({ ProgramFiles: 'D:\\Tools\\' }, 'win32'), ['D:\\Tools\\Git\\cmd\\git.exe'])
 })
 
 const GIT_OK = (() => {
