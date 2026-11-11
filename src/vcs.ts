@@ -18,7 +18,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { safeJoin } from './paths.js'
 
@@ -95,6 +95,23 @@ interface RunResult {
   code: number
   stdout: string
   stderr: string
+}
+
+/**
+ * v0.10.1：Windows 上 DSH 进程的 PATH 常常没有 git（桌面快捷方式、服务/计划任务启动、
+ * 精简 PATH 都会），此时 `spawn('git')` 直接 ENOENT，版本回溯被静默降级。
+ * 这里给出常见安装位置的兜底候选，probe 失败时按顺序再试。
+ */
+export function gitCandidatePaths(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform !== 'win32') return []
+  const out: string[] = []
+  const programFiles = env.ProgramFiles
+  const programFilesX86 = env['ProgramFiles(x86)']
+  const localAppData = env.LOCALAPPDATA
+  if (programFiles !== undefined && programFiles !== '') out.push(join(programFiles, 'Git', 'cmd', 'git.exe'))
+  if (programFilesX86 !== undefined && programFilesX86 !== '') out.push(join(programFilesX86, 'Git', 'cmd', 'git.exe'))
+  if (localAppData !== undefined && localAppData !== '') out.push(join(localAppData, 'Programs', 'Git', 'cmd', 'git.exe'))
+  return out
 }
 
 function run(gitBinary: string, args: string[], cwd: string, timeoutMs = 15_000): Promise<RunResult> {
@@ -213,7 +230,7 @@ export class GitVcs {
   /** 最近一次 git 故障信息（v0.4 起对外公开，供诊断记录读取）。 */
   lastError: string | null = null
 
-  constructor(root: string, config: VcsConfig, private readonly gitBinary = 'git') {
+  constructor(root: string, config: VcsConfig, private gitBinary = 'git') {
     this.root = root
     this.config = config
   }
@@ -269,12 +286,22 @@ export class GitVcs {
   }
 
   private async probe(): Promise<void> {
-    try {
-      const res = await run(this.gitBinary, ['--version'], this.root)
-      this.available = res.code === 0 && /^git version /u.test(res.stdout.trim())
-    } catch {
-      this.available = false
+    // v0.10.1：先按配置/默认名探测，Windows 上再试常见安装路径（PATH 缺 git 时不至于整体降级）。
+    // 显式注入的二进制（测试用的假 git）不做兜底，否则降级路径测不出来。
+    const candidates = this.gitBinary === 'git' ? [this.gitBinary, ...gitCandidatePaths()] : [this.gitBinary]
+    for (const binary of candidates) {
+      try {
+        const res = await run(binary, ['--version'], this.root)
+        if (res.code === 0 && /^git version /u.test(res.stdout.trim())) {
+          this.gitBinary = binary
+          this.available = true
+          return
+        }
+      } catch {
+        // ENOENT / 超时：换下一个候选
+      }
     }
+    this.available = false
   }
 
   private async ensureRepo(): Promise<void> {

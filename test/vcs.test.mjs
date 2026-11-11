@@ -1,4 +1,4 @@
-﻿/**
+/**
  * v0.2 git 版本回溯测试。
  *
  * - 纯逻辑单测：commit message 生成 / numstat 解析 / restore 目标展开。
@@ -17,7 +17,24 @@ import { DEFAULT_CONFIG } from '../dist/config.js'
 import { DigestEngine } from '../dist/digest.js'
 import { MemoryStore } from '../dist/store.js'
 import { createTools } from '../dist/tools.js'
-import { GitVcs, buildCommitMessage, expandTargets, parseNumstat, toGitRel } from '../dist/vcs.js'
+import { GitVcs, buildCommitMessage, expandTargets, gitCandidatePaths, parseNumstat, toGitRel } from '../dist/vcs.js'
+
+test('vcs(v0.10.1): Windows PATH 缺 git 时的兜底候选路径', () => {
+  const env = {
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    LOCALAPPDATA: 'C:\\Users\\u\\AppData\\Local',
+  }
+  assert.deepEqual(gitCandidatePaths(env, 'win32'), [
+    'C:\\Program Files\\Git\\cmd\\git.exe',
+    'C:\\Program Files (x86)\\Git\\cmd\\git.exe',
+    'C:\\Users\\u\\AppData\\Local\\Programs\\Git\\cmd\\git.exe',
+  ])
+  // 非 Windows 不猜路径（避免把 Un*x 上的行为搞乱）
+  assert.deepEqual(gitCandidatePaths(env, 'linux'), [])
+  // 环境变量缺失时跳过，而不是产出坏路径
+  assert.deepEqual(gitCandidatePaths({}, 'win32'), [])
+})
 
 const GIT_OK = (() => {
   try {

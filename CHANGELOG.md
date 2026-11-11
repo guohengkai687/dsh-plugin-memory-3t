@@ -3,6 +3,28 @@
 本文件记录 dsh-plugin-memory-3t 的版本变更。版本号与 `package.json` / `src/shared.ts`
 的 `PLUGIN_VERSION` 一致（`test/version.test.mjs` 断言），发版打 `v<version>` tag。
 
+## v0.10.1 — 2026-11-11
+
+**主题：修复 v0.10.0 引入的两个实机故障**——上线 14 天里，周演化一次都没跑成，版本回溯也从某次重启开始静默降级。两处都在诊断里留了痕，趁 12 天复盘一并修掉。
+
+### 修复
+
+- **llm 服务取值方式（根因）**：`src/index.ts` 原来直接读 `ctx.llm`，而本插件 `inject` 声明里没有 `llm` —— Cordis 对未声明 inject 的服务做属性访问会抛 `cannot get property "llm" without inject`。这行代码在会话启动边的「周演化懒触发」里，异常冒泡到外层 catch（还被打成「会话视图装载失败」），于是**演化整块被跳过**：`meta.json#evolve.lastRunAt` 停在 2026-10-28，14 天 `runs` 一直是 1。现改为 `resolveLlmService(ctx)`：优先 Cordis 反射读 `ctx.get('llm')`，再退化到属性访问并吞掉异常，拿不到按"没有模型"走启发式（`src/llm.ts`）。
+- **触发点隔离**：周演化懒触发单独包 try/catch，失败只记 `周演化触发失败（降级）`，不再影响会话启动边的其余步骤。
+- **手动 op=evolve 同样防御**：`llmFactory` 内部包 try/catch，宿主拒绝访问时返回 null（走启发式）。
+- **Windows PATH 缺 git**：`GitVcs.probe()` 原来只试 `git`（默认名）。桌面快捷方式/服务启动的 DSH 进程 PATH 常不含 Git，导致 `available:false`、版本回溯**静默降级**（本机实况：11-11 的 `runtime/2026-11-11.md` 与 `meta.json` 改动一直没提交）。现 `gitCandidatePaths()` 兜底 `%ProgramFiles%\Git\cmd\git.exe`、`%ProgramFiles(x86)%\Git\cmd\git.exe`、`%LOCALAPPDATA%\Programs\Git\cmd\git.exe`；探测成功后缓存实际路径。显式注入的假 git（测试降级路径）不参与兜底。
+
+### 测试
+
+- `test/llm.test.mjs` 新增 1 例（反射优先、属性访问抛错不外泄、反射自身抛错仍能回退、非对象输入）。
+- `test/vcs.test.mjs` 新增 1 例（三个候选路径、非 Windows 返回空、环境变量缺失不产坏路径）。
+- 全量 **226 tests / 226 pass / 0 fail / 0 skip**。
+
+### 升级后
+
+- 重启 DSH 后，`devmemory_status` 的 `vcs.available` 应恢复 `true`，`diag.recent` 里的 `cannot get property "llm" without inject` 不再出现。
+- 下一轮会话启动会补跑周演化（`lastRunAt` 仍是 10-28，早已到期）。
+
 ## v0.10.0 — 2026-10-28
 
 **主题：周演化 P1–P3**——把「无 LLM 闭环」升级成「用当前会话大模型提炼与判重、用回放指标自调阈值、顺手互链与自检」的闭环。设计文档：`docs/design/DESIGN-evolve-v0.9.md`；运维指南：`docs/evolve.md`。

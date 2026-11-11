@@ -142,6 +142,39 @@ export function createLlmClient(options: LlmClientOptions): LlmClient | null {
   }
 }
 
+/** 插件上下文里取 llm 服务的最小形状（见 index.ts 的 PluginContext）。 */
+export interface LlmHostContext {
+  get?(name: string, strict?: boolean): unknown
+  [key: string]: unknown
+}
+
+/**
+ * v0.10.1：安全取宿主 llm 服务。
+ *
+ * Cordis 对**未声明 inject** 的服务做属性访问会直接抛
+ * `cannot get property "llm" without inject`；v0.10.0 正是因此在会话启动时抛出，
+ * 把周演化懒触发整体中断（实机上 14 天没跑）。这里优先走 Cordis 反射读
+ * `ctx.get('llm')`，失败再退化为属性访问并吞掉异常——拿不到就当"没有模型"，
+ * 由调用方回退启发式。
+ */
+export function resolveLlmService(ctx: unknown): unknown {
+  if (ctx === null || typeof ctx !== 'object') return undefined
+  const host = ctx as LlmHostContext
+  if (typeof host.get === 'function') {
+    try {
+      const viaGet = host.get('llm')
+      if (viaGet !== undefined && viaGet !== null) return viaGet
+    } catch {
+      // 反射不可用（headless stub）：继续尝试属性访问
+    }
+  }
+  try {
+    return host.llm
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * 从模型输出里提取第一个 JSON 值（允许 ```json 围栏、前后废话）。
  * 解析失败返回 null，调用方据此回退启发式。

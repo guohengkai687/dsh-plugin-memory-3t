@@ -105,6 +105,7 @@ node bin/dev-memory-evolve.mjs --root . --stages harvest,evaluate,report --windo
 | 归档太多想恢复 | `devmemory_admin(op="restore", id="<id>")`；`listArchived()` 在 devmemory_status 之外用 CLI/脚本查 `spaces/archive/` |
 | 想整轮回滚 | `git log --grep='^\[evolve\]'` → `git revert <hash>` |
 | 阶段报错 | 报告 `errors[]`；`devmemory_admin(op="diag", level="error")` |
+| 一直没跑、`lastRunAt` 停很久 | 先看诊断里是否有 `cannot get property "llm" without inject`——v0.10.0 的缺陷（取 llm 服务方式不对，异常把懒触发整块打断），升级 v0.10.1 即可 |
 | 卡住不跑 | `meta.evolve.running` 是否残留（>10 分钟租约会自动失效；也可手工 `updateEvolveState({running:null})`） |
 
 ## 成本

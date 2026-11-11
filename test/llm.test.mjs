@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createLlmClient, extractJson, resolveRoute, sessionRouteOf } from '../dist/llm.js'
+import { createLlmClient, extractJson, resolveLlmService, resolveRoute, sessionRouteOf } from '../dist/llm.js'
 
 /** 造一个最小宿主 llm 服务：prepareCall 回显 config，stream 吐给定分片。 */
 function fakeService(chunks, seen = []) {
@@ -83,4 +83,34 @@ test('llm(v0.10.0): finish=error 抛错（供调用方回退启发式）', async
   const client = createLlmClient({ service, explicit: { provider: 'p', model: 'm' } })
   assert.ok(client !== null)
   await assert.rejects(() => client.complete({ system: 's', prompt: 'q' }), /额度用尽/u)
+})
+
+test('llm(v0.10.1): resolveLlmService 优先反射读，属性访问抛错也不能外泄', () => {
+  const service = { prepareCall: async () => ({ config: {}, async *stream() {} }) }
+
+  // 1) Cordis 反射可用：ctx.get('llm') 命中
+  assert.equal(resolveLlmService({ get: () => service }), service)
+  // 2) 反射拿不到 + 属性访问直接抛（未声明 inject 的真实行为）→ undefined，绝不抛
+  const hostile = { get: () => undefined }
+  Object.defineProperty(hostile, 'llm', {
+    get() {
+      throw new Error('cannot get property "llm" without inject')
+    },
+  })
+  assert.equal(resolveLlmService(hostile), undefined)
+  // 3) 没有 get 的普通对象：退回属性访问
+  assert.equal(resolveLlmService({ llm: service }), service)
+  // 4) 反射本身抛错也不外泄
+  assert.equal(
+    resolveLlmService({
+      get() {
+        throw new Error('inactive context')
+      },
+      llm: service,
+    }),
+    service,
+  )
+  // 5) 非对象输入
+  assert.equal(resolveLlmService(null), undefined)
+  assert.equal(resolveLlmService('x'), undefined)
 })

@@ -38,7 +38,7 @@ import { resolve } from 'node:path'
 import { mergeConfig, type Config } from './config.js'
 import { DigestEngine, messageText } from './digest.js'
 import { evolutionDue, runEvolution } from './evolve.js'
-import { createLlmClient, sessionRouteOf, type LlmRoute } from './llm.js'
+import { createLlmClient, resolveLlmService, sessionRouteOf, type LlmRoute } from './llm.js'
 import { NUDGE_MESSAGE, pickNudgeTarget, RecallNudgeController } from './nudge.js'
 import { approximateTokens, clampLines, clampTokens, dropReplayedPrompts, isReplayedPrompt, normalizeForDedup, renderBootBlock, renderRuntimeBlock, renderSpaceBlock, renderStatusBlock, takeWithinBudget } from './render.js'
 import { seedLibrary } from './seed.js'
@@ -473,24 +473,30 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
       //    用本会话已解析的 store（B1 教训：禁止全局 active），失败只记诊断、不影响会话。
       //    v0.10.0：默认用当前会话的大模型做提炼/语义合并；宿主没给 llm 服务就回退启发式。
       if (config.evolve.enabled && evolutionDue(store.evolveState, config.evolve)) {
-        const llm = createLlmClient({
-          service: (ctx as unknown as { llm?: unknown }).llm,
-          explicit: config.evolve.llm,
-          session: sessionRouteOf(agent),
-          defaultMaxTokens: config.evolve.llm.maxTokens,
-          defaultTimeoutMs: config.evolve.llm.timeoutMs,
-        })
-        void runEvolution(store, config.evolve, { llm })
-          .then((report) => {
-            if (report !== null) {
-              ctx.logger.info?.(
-                `[dev-memory] 周演化完成：新增 ${report.consolidate.created.length} / 合并 ${report.consolidate.merged.length} / 互链 ${report.consolidate.linked.length} / 归档 ${report.forget.archived.length}（${report.durationMs}ms，提炼=${report.reflect.mode}）`,
-              )
-            }
+        // v0.10.1：llm 服务取不到（或宿主拒绝属性访问）时一律按"没有模型"走启发式，
+        // 绝不能让演化触发把会话启动边搞挂（v0.10.0 曾抛 without inject 并整体中断）。
+        try {
+          const llm = createLlmClient({
+            service: resolveLlmService(ctx),
+            explicit: config.evolve.llm,
+            session: sessionRouteOf(agent),
+            defaultMaxTokens: config.evolve.llm.maxTokens,
+            defaultTimeoutMs: config.evolve.llm.timeoutMs,
           })
-          .catch((error: unknown) => {
-            warn(`[dev-memory] 周演化失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
-          })
+          void runEvolution(store, config.evolve, { llm })
+            .then((report) => {
+              if (report !== null) {
+                ctx.logger.info?.(
+                  `[dev-memory] 周演化完成：新增 ${report.consolidate.created.length} / 合并 ${report.consolidate.merged.length} / 互链 ${report.consolidate.linked.length} / 归档 ${report.forget.archived.length}（${report.durationMs}ms，提炼=${report.reflect.mode}）`,
+                )
+              }
+            })
+            .catch((error: unknown) => {
+              warn(`[dev-memory] 周演化失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
+            })
+        } catch (error) {
+          warn(`[dev-memory] 周演化触发失败（降级）: ${error instanceof Error ? error.message : String(error)}`)
+        }
       }
       // 6) webServer 可能晚于插件 apply 才就绪 → 首次会话补一次面板挂载
       ensurePanel()
@@ -649,14 +655,20 @@ export function apply(ctx: PluginContext, rawConfig: unknown): void {
     {
       profile: config.toolsProfile,
       // v0.10.0：手动 op=evolve 也默认用当前会话模型；最近一次会话的路由在 handleSessionStart 里刷新
-      llmFactory: () =>
-        createLlmClient({
-          service: (ctx as unknown as { llm?: unknown }).llm,
-          explicit: config.evolve.llm,
-          session: latestSessionRoute,
-          defaultMaxTokens: config.evolve.llm.maxTokens,
-          defaultTimeoutMs: config.evolve.llm.timeoutMs,
-        }),
+      // v0.10.1：同样走 resolveLlmService，宿主拒绝属性访问时按"没有模型"回退启发式
+      llmFactory: () => {
+        try {
+          return createLlmClient({
+            service: resolveLlmService(ctx),
+            explicit: config.evolve.llm,
+            session: latestSessionRoute,
+            defaultMaxTokens: config.evolve.llm.maxTokens,
+            defaultTimeoutMs: config.evolve.llm.timeoutMs,
+          })
+        } catch {
+          return null
+        }
+      },
     },
   )) {
     try {
